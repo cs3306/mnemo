@@ -45,3 +45,36 @@ func TestAPIValidation(t *testing.T) {
 		t.Fatal("API-only mode (no Telegram token) must be valid")
 	}
 }
+
+func TestSearchProvider(t *testing.T) {
+	load := func(extra map[string]string) (*Config, []string) {
+		env := map[string]string{"API_ADDR": ":8088", "API_KEY": "k", "LLM_BASE_URL": "http://x", "LLM_MODEL": "m", "EMBED_BASE_URL": "http://e", "EMBED_MODEL": "e", "SEARCH_ENABLED": "true", "SEARCH_BASE_URL": "http://s"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		c, err := Load(mapEnv(env))
+		if err != nil {
+			return nil, []string{err.Error()}
+		}
+		return c, c.Validate()
+	}
+	if c, errs := load(nil); len(errs) != 0 || c.SearchProvider != "deepseek" {
+		t.Fatalf("default provider: %v", errs)
+	}
+	if _, errs := load(map[string]string{"SEARCH_PROVIDER": "searxng"}); len(errs) == 0 {
+		t.Fatal("searxng without SEARXNG_URL must fail")
+	}
+	if _, errs := load(map[string]string{"SEARCH_PROVIDER": "searxng", "SEARXNG_URL": "localhost:8080"}); len(errs) == 0 {
+		t.Fatal("SEARXNG_URL without scheme must fail")
+	}
+	c, errs := load(map[string]string{"SEARCH_PROVIDER": "SearXNG", "SEARXNG_URL": "http://searxng:8080/"})
+	if len(errs) != 0 || c.SearchProvider != "searxng" || c.SearxngURL != "http://searxng:8080" {
+		t.Fatalf("%+v %v", c, errs)
+	}
+	if _, errs := load(map[string]string{"SEARCH_PROVIDER": "bing"}); len(errs) == 0 {
+		t.Fatal("unknown provider must fail")
+	}
+	if _, errs := load(map[string]string{"SEARCH_ENABLED": "false", "SEARCH_PROVIDER": "searxng"}); len(errs) != 0 {
+		t.Fatalf("disabled search needs no URL: %v", errs)
+	}
+}

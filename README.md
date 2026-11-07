@@ -86,6 +86,19 @@ WantedBy=multi-user.target
 #### 联网搜索（可选）
 `SEARCH_ENABLED=true` 后，模型自带 `web_search` / `web_fetch` 两个工具，由服务端调用 DeepSeek 的 Search/Fetch API（约 5 元/千次成功请求，失败不计费）。Telegram 和 API 都可用。搜索词和 URL 会发送给该服务。
 
+也可以改用自建的 [SearXNG](https://docs.searxng.org/)，不收费、不依赖第三方 API：`SEARCH_PROVIDER=searxng`，`SEARXNG_URL=http://searxng:8080`。SearXNG 的 `settings.yml` 需要启用 json 输出（否则返回 403）：
+
+```yaml
+use_default_settings: true
+search:
+  formats: [html, json]
+server:
+  secret_key: "换成随机字符串"
+  limiter: false   # 仅内网使用时
+```
+
+此模式下 `web_fetch` 由程序内置抓取：只接受 http(s)，拒绝回环/内网/链路本地/CGNAT 地址（含重定向，防 SSRF），2 MiB 上限、20 秒超时，仅取 HTML/文本并转为纯文字。局限：不执行 JavaScript，非 UTF-8 编码（如 GBK）页面会乱码；SearXNG 只是聚合器，搜索词仍会发给它所用的公共搜索引擎。确需抓取内网地址时设 `FETCH_ALLOW_PRIVATE=true`。
+
 ### 用量与费用
 每次调用的 token 用量（含 DeepSeek 的缓存命中/未命中）按“对话/后台整理/读图”累计保存。`/status` 显示次数、输入、缓存命中率、输出；设置 `PRICE_*` 后还会显示估算费用（不区分高峰/空闲时段，仅作参考）。`/balance` 查询 DeepSeek 余额。
 最近原文窗口按批裁剪（滚动摘要在 125% 时一次裁到 60%），而不是每轮丢一条，以保持提示前缀稳定、提高缓存命中；`RECENT_TOKENS` 是目标值，实际窗口在约 60%–125% 之间波动。
@@ -242,6 +255,19 @@ The `companion` model supports OpenAI `tools`: the frontend declares its own too
 
 #### Web search (optional)
 With `SEARCH_ENABLED=true` the model gets two built-in tools, `web_search` and `web_fetch`, executed server-side through DeepSeek's Search/Fetch API (about ¥5 per 1000 successful requests; failures are free). Works for both Telegram and the API. Search queries and URLs are sent to that service.
+
+Alternatively use a self-hosted [SearXNG](https://docs.searxng.org/) (free, no third-party API): `SEARCH_PROVIDER=searxng`, `SEARXNG_URL=http://searxng:8080`. Its `settings.yml` must enable JSON output (otherwise 403):
+
+```yaml
+use_default_settings: true
+search:
+  formats: [html, json]
+server:
+  secret_key: "change-me"
+  limiter: false   # internal use only
+```
+
+In this mode `web_fetch` is built in: http(s) only, loopback/private/link-local/CGNAT addresses are refused (redirects included, SSRF guard), 2 MiB cap, 20 s timeout, HTML/text only, converted to plain text. Limits: no JavaScript execution, non-UTF-8 pages (e.g. GBK) come out garbled; SearXNG is an aggregator, so queries still reach the public engines behind it. Set `FETCH_ALLOW_PRIVATE=true` if you really need internal URLs.
 
 ### Usage and cost
 Token usage of every call (including DeepSeek cache hit/miss) is accumulated per kind: chat / background maintenance / vision. `/status` shows call count, input, cache hit rate and output; with `PRICE_*` set it also shows an estimated cost (it does not distinguish peak from off-peak hours, for reference only). `/balance` queries your DeepSeek balance.

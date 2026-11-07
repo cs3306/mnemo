@@ -76,6 +76,7 @@ type App struct {
 	personaWarned atomic.Bool
 	tr            *tracker
 	httpc         *http.Client
+	fetchc        *http.Client  // web_fetch (SEARCH_PROVIDER=searxng): guarded against internal addresses
 	visionState   atomic.Int32  // visionUnknown / visionOK / visionBad, see visionprobe.go
 	probeCode     func() string // tests override the random probe code
 
@@ -103,6 +104,7 @@ func New(cfg *config.Config, d Deps) (*App, error) {
 		tr:           &tracker{st: d.Store},
 		httpc:        &http.Client{},
 	}
+	a.fetchc = newFetchClient(cfg.FetchAllowPrivate, a.checkFetchHost)
 	for kind, c := range map[string]llm.Completer{"chat": d.Chat, "maint": d.Maint, "vision": d.Vision} {
 		if cl, ok := c.(*llm.Client); ok && cl != nil {
 			cl.OnUsage = a.tr.hook(kind)

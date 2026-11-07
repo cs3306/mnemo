@@ -101,6 +101,13 @@ func (a *App) runBuiltin(ctx context.Context, c toolCall) string {
 		if len(q) > 128 {
 			q = q[:128]
 		}
+		if a.cfg.SearchProvider == "searxng" {
+			res, err := a.searxngSearch(ctx, string(q))
+			if err != nil {
+				return "搜索失败：" + err.Error()
+			}
+			return res
+		}
 		var out struct {
 			Results []struct {
 				Title    string `json:"title"`
@@ -130,6 +137,16 @@ func (a *App) runBuiltin(ctx context.Context, c toolCall) string {
 		u, err := url.Parse(strings.TrimSpace(args.URL))
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
 			return "url 必须是不含账号密码的 http(s) 链接"
+		}
+		if a.cfg.SearchProvider == "searxng" {
+			title, text, err := a.fetchPage(ctx, u)
+			if err != nil {
+				return "抓取失败：" + err.Error()
+			}
+			if text == "" {
+				return "未能获取到可用内容"
+			}
+			return truncate(strings.TrimSpace(title+"\n"+text), 6000)
 		}
 		var out struct {
 			Title   string `json:"title"`

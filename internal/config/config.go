@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -49,10 +50,13 @@ type Config struct {
 	APIKey   string
 	APIModel string // model name advertised by the API
 
-	SearchEnabled bool   // give the model web_search / web_fetch tools (DeepSeek Search/Fetch API)
-	SearchBase    string // default: LLM_BASE_URL without a trailing /v1
-	SearchKey     string // default: LLM_API_KEY
-	MaxToolRounds int
+	SearchEnabled     bool   // give the model web_search / web_fetch tools (DeepSeek Search/Fetch API)
+	SearchBase        string // default: LLM_BASE_URL without a trailing /v1
+	SearchKey         string // default: LLM_API_KEY
+	SearchProvider    string // "deepseek" (default) or "searxng"
+	SearxngURL        string // SEARXNG_URL, e.g. http://searxng:8080
+	FetchAllowPrivate bool   // allow web_fetch to reach private/loopback addresses (searxng provider)
+	MaxToolRounds     int
 
 	PriceHit, PriceMiss, PriceOut float64 // per million tokens, optional (for the /status cost estimate)
 	PriceCurrency                 string
@@ -193,14 +197,28 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.SearchEnabled = e.boolean("SEARCH_ENABLED", false)
 	c.SearchBase = strings.TrimSuffix(strings.TrimRight(e.str("SEARCH_BASE_URL", c.LLM.BaseURL), "/"), "/v1")
 	c.SearchKey = e.str("SEARCH_API_KEY", c.LLM.APIKey)
+	c.SearchProvider = strings.ToLower(e.str("SEARCH_PROVIDER", "deepseek"))
+	c.SearxngURL = strings.TrimRight(e.str("SEARXNG_URL", ""), "/")
+	c.FetchAllowPrivate = e.boolean("FETCH_ALLOW_PRIVATE", false)
 	c.MaxToolRounds = e.integer("MAX_TOOL_ROUNDS", 4)
 	c.PriceHit = e.float("PRICE_CACHE_HIT", 0)
 	c.PriceMiss = e.float("PRICE_CACHE_MISS", 0)
 	c.PriceOut = e.float("PRICE_OUTPUT", 0)
 	c.PriceCurrency = e.str("PRICE_CURRENCY", "元")
 
-	if c.SearchEnabled && c.SearchBase == "" {
-		e.errs = append(e.errs, "SEARCH_ENABLED needs SEARCH_BASE_URL or LLM_BASE_URL")
+	switch c.SearchProvider {
+	case "deepseek":
+		if c.SearchEnabled && c.SearchBase == "" {
+			e.errs = append(e.errs, "SEARCH_ENABLED needs SEARCH_BASE_URL or LLM_BASE_URL")
+		}
+	case "searxng":
+		if c.SearchEnabled {
+			if u, err := url.Parse(c.SearxngURL); c.SearxngURL == "" || err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				e.errs = append(e.errs, "SEARCH_PROVIDER=searxng needs SEARXNG_URL (an http(s) URL, e.g. http://searxng:8080)")
+			}
+		}
+	default:
+		e.errs = append(e.errs, fmt.Sprintf("SEARCH_PROVIDER must be deepseek or searxng, got %q", c.SearchProvider))
 	}
 	if len(e.errs) > 0 {
 		return c, fmt.Errorf("invalid configuration: %s", strings.Join(e.errs, "; "))

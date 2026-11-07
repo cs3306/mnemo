@@ -99,6 +99,18 @@ server:
 
 此模式下 `web_fetch` 由程序内置抓取：只接受 http(s)，拒绝回环/内网/链路本地/CGNAT 地址（含重定向，防 SSRF），2 MiB 上限、20 秒超时，仅取 HTML/文本并转为纯文字。局限：不执行 JavaScript，非 UTF-8 编码（如 GBK）页面会乱码；SearXNG 只是聚合器，搜索词仍会发给它所用的公共搜索引擎。确需抓取内网地址时设 `FETCH_ALLOW_PRIVATE=true`。
 
+### 插件：文档、表格、图像等外部工具（可选）
+
+mnemo 本身只做对话与记忆。要让模型生成 Word / PowerPoint / Excel / PDF / LaTeX、画图，或接你自己的工具，部署一个或多个**插件服务**（独立 HTTP 服务，语言不限），然后：
+
+```
+PLUGIN_URLS=http://mnemo-plugin:8090       # 逗号分隔，可有多个
+PLUGIN_TOKEN=<共享令牌>
+PLUGIN_TIMEOUT=180                         # 单次工具调用的秒数
+```
+
+启动时 mnemo 向每个服务 `GET /v1/tools` 获取工具清单并交给模型；模型调用时转发为 `POST /v1/tools/{name}`。工具返回的文件在 Telegram 里作为文档/图片发送；通过 OpenAI 兼容 API 访问时没有文件通道，文件会被丢弃，并告知模型。服务暂时连不上不影响对话，之后每分钟重试一次；`/plugins` 查看状态，`/plugins reload` 立即重新发现。协议（几十行就能实现）与官方插件服务见 [mnemo-plugin](https://github.com/cs3306/mnemo-plugin)。工具名不能与内置的 `web_search` / `web_fetch` 重名。
+
 ### 用量与费用
 每次调用的 token 用量（含 DeepSeek 的缓存命中/未命中）按“对话/后台整理/读图”累计保存。`/status` 显示次数、输入、缓存命中率、输出；设置 `PRICE_*` 后还会显示估算费用（不区分高峰/空闲时段，仅作参考）。`/balance` 查询 DeepSeek 余额。
 最近原文窗口按批裁剪（滚动摘要在 125% 时一次裁到 60%），而不是每轮丢一条，以保持提示前缀稳定、提高缓存命中；`RECENT_TOKENS` 是目标值，实际窗口在约 60%–125% 之间波动。
@@ -146,7 +158,7 @@ docker run --rm <镜像名> defaults profile > config/profile.md
 - **记忆连续 ≠ 人格连续**：不同模型语气不同。用 `/pin` 把你喜欢的回复固定为“风格示例”，会放进系统提示，帮助新模型对齐语气；`persona.md` 可直接编辑（见上面“自定义人设与档案”）。
 
 ### 命令
-`/memory [关键词]` `/balance` `/visiontest` `/profile reload` `/forget <id>` `/edit <id> <内容>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/reembed` `/consolidate` `/status` `/help`
+`/memory [关键词]` `/balance` `/visiontest` `/plugins [reload]` `/profile reload` `/forget <id>` `/edit <id> <内容>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/reembed` `/consolidate` `/status` `/help`
 
 ### 配置
 见 `.env.example`。常用：`RECENT_TOKENS`（最近原文预算）、`MEMORY_TOKENS`、`TOP_K`、`MIN_SIM`、`EXTRACT_EVERY`、`IDLE_MINUTES`、`CONSOLIDATE_HOURS`。
@@ -167,7 +179,7 @@ Qwen3 系列关闭思考：`LLM_EXTRA_BODY={"chat_template_kwargs":{"enable_thin
 ### 已验证 / 未验证
 已验证（在开发沙箱中）：工具调用往返（含工具结果里的图片转写、历史不含工具噪声）、服务端内置搜索循环与轮数上限、用量/缓存命中解析与 `/status`、提示前缀跨轮稳定、余额解析（均用模拟服务）；HTTP API（鉴权、只取最后一条用户消息、会话共享与隔离、SSE 格式、raw 透传不入库、拒绝远程图片 URL）；`gofmt`、`go vet`、`go test -race`（store 重放/压缩/硬删除/导入导出、LLM 重试与 extra body、嵌入批处理、检索与换嵌入模型后的重嵌入、提示词布局、token 不泄露、bot 白名单与命令）；静态编译 linux/amd64 与 arm64；用 mock Telegram+LLM 端到端跑通真实二进制（收消息→回复→后台抽取记忆→export→healthcheck→SIGTERM 正常退出）；`docker compose config` 通过；`docker build` 已由使用者在本机构建成功。
 
-**未验证**：真实 DeepSeek 的 Search/Fetch、`/user/balance` 鉴权、`thinking` 字段与 tool_calls 的实际响应；对真实 Telegram 服务器的联调；真实 DeepSeek / llama.cpp 的响应细节（DeepSeek 模型名请以官方文档为准）；可选 profile 里 llama.cpp 的镜像 tag 与参数；读图在真实视觉模型上的效果（自检逻辑只用假模型测过）；systemd 单元写法；长期（数周）记忆质量需要你实际使用后评估。
+**未验证**：插件文件通过真实 Telegram 服务器上传（`sendDocument`/`sendPhoto` 只对照模拟服务测过）；真实 SearXNG 实例；真实 DeepSeek 的 Search/Fetch、`/user/balance` 鉴权、`thinking` 字段与 tool_calls 的实际响应；对真实 Telegram 服务器的联调；真实 DeepSeek / llama.cpp 的响应细节（DeepSeek 模型名请以官方文档为准）；可选 profile 里 llama.cpp 的镜像 tag 与参数；读图在真实视觉模型上的效果（自检逻辑只用假模型测过）；systemd 单元写法；长期（数周）记忆质量需要你实际使用后评估。
 
 ### 许可
 MIT
@@ -269,6 +281,18 @@ server:
 
 In this mode `web_fetch` is built in: http(s) only, loopback/private/link-local/CGNAT addresses are refused (redirects included, SSRF guard), 2 MiB cap, 20 s timeout, HTML/text only, converted to plain text. Limits: no JavaScript execution, non-UTF-8 pages (e.g. GBK) come out garbled; SearXNG is an aggregator, so queries still reach the public engines behind it. Set `FETCH_ALLOW_PRIVATE=true` if you really need internal URLs.
 
+### Plugins: documents, spreadsheets, images, your own tools (optional)
+
+mnemo itself only does conversation and memory. To let the model produce Word / PowerPoint / Excel / PDF / LaTeX, draw images, or call your own tools, run one or more **plugin servers** (stand-alone HTTP services, any language) and set:
+
+```
+PLUGIN_URLS=http://mnemo-plugin:8090       # comma-separated, several allowed
+PLUGIN_TOKEN=<shared token>
+PLUGIN_TIMEOUT=180                         # seconds per tool call
+```
+
+At startup mnemo calls `GET /v1/tools` on each server and offers those tools to the model; a call is forwarded as `POST /v1/tools/{name}`. Files a tool returns are sent as documents/photos on Telegram; over the OpenAI-compatible API there is no file channel, so they are dropped and the model is told. A server that is down does not stop the conversation and is retried once a minute; `/plugins` shows the status, `/plugins reload` re-discovers immediately. The protocol (a few dozen lines to implement) and the reference plugin server live in [mnemo-plugin](https://github.com/cs3306/mnemo-plugin). Tool names must not collide with the built-in `web_search` / `web_fetch`.
+
 ### Usage and cost
 Token usage of every call (including DeepSeek cache hit/miss) is accumulated per kind: chat / background maintenance / vision. `/status` shows call count, input, cache hit rate and output; with `PRICE_*` set it also shows an estimated cost (it does not distinguish peak from off-peak hours, for reference only). `/balance` queries your DeepSeek balance.
 The recent-message window is trimmed in batches (the rolling summary cuts from 125% down to 60% in one go) instead of dropping one message per turn, which keeps the prompt prefix stable and improves cache hits. `RECENT_TOKENS` is a target; the actual window fluctuates between roughly 60% and 125% of it.
@@ -316,7 +340,7 @@ Add to `compose.yml`:
 - **Continuous memory ≠ continuous personality**: different models sound different. Use `/pin` to fix replies you like as style examples; they go into the system prompt and help a new model match the tone. `persona.md` can be edited directly (see "Customizing the persona and profile" above).
 
 ### Commands
-`/memory [keyword]` `/balance` `/visiontest` `/profile reload` `/forget <id>` `/edit <id> <text>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/reembed` `/consolidate` `/status` `/help`
+`/memory [keyword]` `/balance` `/visiontest` `/plugins [reload]` `/profile reload` `/forget <id>` `/edit <id> <text>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/reembed` `/consolidate` `/status` `/help`
 
 ### Configuration
 See `.env.example`. Common knobs: `RECENT_TOKENS` (recent-message budget), `MEMORY_TOKENS`, `TOP_K`, `MIN_SIM`, `EXTRACT_EVERY`, `IDLE_MINUTES`, `CONSOLIDATE_HOURS`.
@@ -338,7 +362,7 @@ Note: when you load `.env` with a shell `source`, wrap JSON values in single quo
 ### Verified / not verified
 Verified (in the development sandbox, using fake/mock servers): tool-calling round trip (including image transcription in tool results, no tool noise in history), the built-in search loop and its round cap, usage/cache-hit parsing and `/status`, prompt prefix stability across turns, balance parsing; the HTTP API (auth, last-user-message-only, shared and isolated conversations, SSE format, raw pass-through not stored, remote image URLs rejected); `gofmt`, `go vet`, `go test -race` (store replay/compaction/hard delete/import-export, LLM retry and extra body, embedding batching, retrieval and re-embedding after an embedding-model change, prompt layout, tokens not leaked, bot allowlist and commands); static builds for linux/amd64 and arm64; an end-to-end run of the real binary against a mock Telegram + LLM (receive message → reply → background memory extraction → export → healthcheck → clean exit on SIGTERM); `docker compose config` passes; `docker build` has been built successfully by the user on their own machine.
 
-**Not verified**: real DeepSeek Search/Fetch, `/user/balance` auth, and the actual responses for the `thinking` field and tool_calls; integration with the real Telegram servers; real-world DeepSeek / llama.cpp response details (check model names against the official docs); image tags and flags of llama.cpp in the optional profiles; image-reading quality on a real vision model (the self-test logic was only tested with fake models); the systemd unit; long-term (weeks) memory quality, which you need to judge from real use.
+**Not verified**: file uploads of plugin results to the real Telegram servers (`sendDocument`/`sendPhoto` were only tested against a mock); a real SearXNG instance; real DeepSeek Search/Fetch, `/user/balance` auth, and the actual responses for the `thinking` field and tool_calls; integration with the real Telegram servers; real-world DeepSeek / llama.cpp response details (check model names against the official docs); image tags and flags of llama.cpp in the optional profiles; image-reading quality on a real vision model (the self-test logic was only tested with fake models); the systemd unit; long-term (weeks) memory quality, which you need to judge from real use.
 
 ### License
 MIT

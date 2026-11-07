@@ -22,7 +22,9 @@ const searchToolDefs = `[
 
 var builtinNames = map[string]bool{"web_search": true, "web_fetch": true}
 
-func (a *App) isBuiltin(name string) bool { return a.cfg.SearchEnabled && builtinNames[name] }
+func (a *App) isBuiltin(name string) bool {
+	return (a.cfg.SearchEnabled && builtinNames[name]) || a.plug.has(name)
+}
 
 // mergeTools combines client-declared tools with the built-in ones (nil when there are none).
 func (a *App) mergeTools(client json.RawMessage) (json.RawMessage, error) {
@@ -37,6 +39,7 @@ func (a *App) mergeTools(client json.RawMessage) (json.RawMessage, error) {
 		_ = json.Unmarshal([]byte(searchToolDefs), &b)
 		arr = append(arr, b...)
 	}
+	arr = append(arr, a.plug.defs()...)
 	if len(arr) == 0 {
 		return nil, nil
 	}

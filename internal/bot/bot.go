@@ -39,6 +39,7 @@ const help = `可用命令：
 /status  查看后端、记忆与 token 用量（含缓存命中率）
 /balance  查询 DeepSeek 账户余额
 /visiontest  检测读图模型是否真的能读图
+/plugins  查看插件工具；/plugins reload 重新发现
 发送图片即可读图（公式、手写、截图）。`
 
 const describePrompt = "请完整转写图片中的文字；数学公式用 LaTeX 写出，看不清或不确定的符号用 [?] 标出，不要猜。" +
@@ -77,6 +78,7 @@ type App struct {
 	tr            *tracker
 	httpc         *http.Client
 	fetchc        *http.Client  // web_fetch (SEARCH_PROVIDER=searxng): guarded against internal addresses
+	plug          *pluginSet    // tool plugin servers (PLUGIN_URLS), see plugins.go
 	visionState   atomic.Int32  // visionUnknown / visionOK / visionBad, see visionprobe.go
 	probeCode     func() string // tests override the random probe code
 
@@ -104,6 +106,7 @@ func New(cfg *config.Config, d Deps) (*App, error) {
 		tr:           &tracker{st: d.Store},
 		httpc:        &http.Client{},
 	}
+	a.plug = newPluginSet(cfg.PluginURLs)
 	a.fetchc = newFetchClient(cfg.FetchAllowPrivate, a.checkFetchHost)
 	for kind, c := range map[string]llm.Completer{"chat": d.Chat, "maint": d.Maint, "vision": d.Vision} {
 		if cl, ok := c.(*llm.Client); ok && cl != nil {
@@ -184,6 +187,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.vision != nil && a.cfg.VisionProbe {
 		a.goBG(func() { a.startupProbe(ctx) })
+	}
+	if len(a.cfg.PluginURLs) > 0 {
+		a.goBG(func() { slog.Info("plugins", "status", a.discoverAll(ctx)) })
 	}
 	if a.cfg.APIAddr != "" {
 		a.goBG(func() {
@@ -360,13 +366,29 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string) {
 		}
 		imgs = []Image{{Data: data, Mime: mime}}
 	}
-	reply, err := a.Respond(ctx, chat, text, imgs)
+	r, err := a.RespondTools(ctx, chat, text, imgs, TurnOpts{Deliver: a.canSendFiles()})
 	if err != nil {
 		slog.Warn("turn failed", "err", err)
 		a.send(ctx, chat, "出错了："+truncate(err.Error(), 200))
 		return
 	}
-	a.send(ctx, chat, reply)
+	a.send(ctx, chat, r.Text)
+	a.deliverFiles(ctx, chat, r.Files)
+}
+
+// deliverFiles uploads the files a tool produced during the turn.
+func (a *App) deliverFiles(ctx context.Context, chat int64, files []OutFile) {
+	fs, ok := a.tg.(FileSender)
+	if !ok {
+		return
+	}
+	for _, f := range files {
+		a.tg.Typing(ctx, chat)
+		if err := fs.SendFile(ctx, chat, f.Name, f.Mime, f.Data); err != nil {
+			slog.Warn("sending file failed", "name", f.Name, "err", err)
+			a.send(ctx, chat, "文件发送失败（"+f.Name+"）："+truncate(err.Error(), 200))
+		}
+	}
 }
 
 // Respond runs one conversation turn for a chat (memory retrieval, prompt, model call, persona,
@@ -380,6 +402,8 @@ func (a *App) Respond(ctx context.Context, chat int64, text string, imgs []Image
 type TurnOpts struct {
 	Tools json.RawMessage // tools declared by the client (OpenAI format)
 	Tail  []llm.Message   // the client's messages after the user message: assistant tool_calls + tool results
+
+	Deliver bool // the frontend can send files produced by plugin tools (Telegram)
 }
 
 // Reply is a final text answer, or (ToolCalls set) a request for the client to run tools and call again.
@@ -387,6 +411,7 @@ type Reply struct {
 	Text      string
 	ToolCalls json.RawMessage
 	Reasoning string
+	Files     []OutFile // produced by plugin tools during the turn, to be delivered by the frontend
 }
 
 func (a *App) describeImages(ctx context.Context, imgs []Image) (string, error) {
@@ -477,6 +502,8 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 	})
 	msgs = append(msgs, opts.Tail...)
 
+	a.ensurePlugins(ctx)
+	ts := &turnState{chat: chat, deliver: opts.Deliver && a.canSendFiles()}
 	tools, err := a.mergeTools(opts.Tools)
 	if err != nil {
 		return Reply{}, err
@@ -525,7 +552,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 		}
 		msgs = append(msgs, llm.Message{Role: "assistant", Content: res.Text, ToolCalls: res.ToolCalls, ReasoningContent: res.Reasoning})
 		for _, c := range calls {
-			msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: c.ID, Content: a.runBuiltin(ctx, c)})
+			msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: c.ID, Content: a.runTool(ctx, c, ts)})
 		}
 		rounds++
 	}
@@ -552,7 +579,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 			}
 		})
 	}
-	return Reply{Text: reply}, nil
+	return Reply{Text: reply, Files: ts.files}, nil
 }
 
 func truncate(s string, n int) string {
@@ -815,6 +842,13 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 			}
 		}
 		reply(out)
+	case "/plugins":
+		if strings.EqualFold(rest, "reload") {
+			reply("重新发现中…")
+			reply(a.discoverAll(ctx))
+			return
+		}
+		reply(a.pluginStatus())
 	case "/visiontest":
 		if a.vision == nil {
 			reply(errVisionOff.Error())

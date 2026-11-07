@@ -78,3 +78,19 @@ func TestSearchProvider(t *testing.T) {
 		t.Fatalf("disabled search needs no URL: %v", errs)
 	}
 }
+
+func TestPluginURLs(t *testing.T) {
+	load := func(urls string) (*Config, error) {
+		return Load(mapEnv(map[string]string{"API_ADDR": ":8088", "API_KEY": "k", "LLM_BASE_URL": "http://x", "LLM_MODEL": "m", "EMBED_BASE_URL": "http://e", "EMBED_MODEL": "e", "PLUGIN_URLS": urls}))
+	}
+	c, err := load(" http://mnemo-plugin:8090/ , ,http://b:1 ")
+	if err != nil || len(c.PluginURLs) != 2 || c.PluginURLs[0] != "http://mnemo-plugin:8090" || c.PluginTimeout.Seconds() != 180 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if _, err := load("mnemo-plugin:8090"); err == nil {
+		t.Fatal("a URL without scheme must be rejected")
+	}
+	if c, err := load(""); err != nil || len(c.PluginURLs) != 0 {
+		t.Fatal("empty means no plugins")
+	}
+}

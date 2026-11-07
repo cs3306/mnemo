@@ -50,12 +50,15 @@ type Config struct {
 	APIKey   string
 	APIModel string // model name advertised by the API
 
-	SearchEnabled     bool   // give the model web_search / web_fetch tools (DeepSeek Search/Fetch API)
-	SearchBase        string // default: LLM_BASE_URL without a trailing /v1
-	SearchKey         string // default: LLM_API_KEY
-	SearchProvider    string // "deepseek" (default) or "searxng"
-	SearxngURL        string // SEARXNG_URL, e.g. http://searxng:8080
-	FetchAllowPrivate bool   // allow web_fetch to reach private/loopback addresses (searxng provider)
+	SearchEnabled     bool          // give the model web_search / web_fetch tools (DeepSeek Search/Fetch API)
+	SearchBase        string        // default: LLM_BASE_URL without a trailing /v1
+	SearchKey         string        // default: LLM_API_KEY
+	SearchProvider    string        // "deepseek" (default) or "searxng"
+	SearxngURL        string        // SEARXNG_URL, e.g. http://searxng:8080
+	FetchAllowPrivate bool          // allow web_fetch to reach private/loopback addresses (searxng provider)
+	PluginURLs        []string      // PLUGIN_URLS: base URLs of tool plugin servers (see README)
+	PluginToken       string        // PLUGIN_TOKEN: bearer token sent to every plugin server
+	PluginTimeout     time.Duration // PLUGIN_TIMEOUT seconds per tool call
 	MaxToolRounds     int
 
 	PriceHit, PriceMiss, PriceOut float64 // per million tokens, optional (for the /status cost estimate)
@@ -200,12 +203,24 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.SearchProvider = strings.ToLower(e.str("SEARCH_PROVIDER", "deepseek"))
 	c.SearxngURL = strings.TrimRight(e.str("SEARXNG_URL", ""), "/")
 	c.FetchAllowPrivate = e.boolean("FETCH_ALLOW_PRIVATE", false)
+	for _, u := range strings.Split(e.str("PLUGIN_URLS", ""), ",") {
+		if u = strings.TrimRight(strings.TrimSpace(u), "/"); u != "" {
+			c.PluginURLs = append(c.PluginURLs, u)
+		}
+	}
+	c.PluginToken = e.str("PLUGIN_TOKEN", "")
+	c.PluginTimeout = time.Duration(e.float("PLUGIN_TIMEOUT", 180) * float64(time.Second))
 	c.MaxToolRounds = e.integer("MAX_TOOL_ROUNDS", 4)
 	c.PriceHit = e.float("PRICE_CACHE_HIT", 0)
 	c.PriceMiss = e.float("PRICE_CACHE_MISS", 0)
 	c.PriceOut = e.float("PRICE_OUTPUT", 0)
 	c.PriceCurrency = e.str("PRICE_CURRENCY", "元")
 
+	for _, u := range c.PluginURLs {
+		if pu, err := url.Parse(u); err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+			e.errs = append(e.errs, fmt.Sprintf("PLUGIN_URLS entry %q must be an http(s) URL", u))
+		}
+	}
 	switch c.SearchProvider {
 	case "deepseek":
 		if c.SearchEnabled && c.SearchBase == "" {

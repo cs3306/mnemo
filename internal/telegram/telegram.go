@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"time"
@@ -117,6 +118,49 @@ func (c *Client) Send(ctx context.Context, chat int64, text string) error {
 		if err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": part}, nil); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// SendFile uploads a file as a photo (small images) or a document. name is shown to the recipient.
+func (c *Client) SendFile(ctx context.Context, chat int64, name, mime string, data []byte) error {
+	method, field := "sendDocument", "document"
+	if (mime == "image/png" || mime == "image/jpeg") && len(data) <= 9<<20 {
+		method, field = "sendPhoto", "photo"
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("chat_id", fmt.Sprint(chat))
+	fw, err := w.CreateFormFile(field, name)
+	if err != nil {
+		return err
+	}
+	if _, err := fw.Write(data); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/bot%s/%s", c.apiBase, c.token, method), &buf)
+	if err != nil {
+		return sanitize(method, err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := (&http.Client{Timeout: 180 * time.Second}).Do(req)
+	if err != nil {
+		return sanitize(method, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var env struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(b, &env); err != nil {
+		return fmt.Errorf("telegram %s: non-JSON response (HTTP %d)", method, resp.StatusCode)
+	}
+	if !env.OK {
+		return fmt.Errorf("telegram %s: %s", method, env.Description)
 	}
 	return nil
 }

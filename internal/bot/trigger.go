@@ -54,6 +54,7 @@ func (a *App) apiTrigger(w http.ResponseWriter, r *http.Request) {
 		req.Label = "定时任务"
 	}
 	label := truncate(strings.ReplaceAll(req.Label, "\n", " "), triggerMaxLabel)
+	slog.Info("scheduled task accepted", "label", label, "chat", chat)
 	a.goBG(func() { a.runScheduled(chat, label, req.Prompt) })
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, map[string]string{"status": "accepted"})
@@ -77,6 +78,13 @@ func (a *App) runScheduled(chat int64, label, prompt string) {
 		a.send(ctx, chat, fmt.Sprintf("定时任务「%s」没有成功：%s", label, truncate(err.Error(), 200)))
 		return
 	}
-	a.send(ctx, chat, r.Text)
+	text := strings.TrimSpace(r.Text)
+	if text == "" && len(r.Files) == 0 {
+		text = fmt.Sprintf("定时任务「%s」跑完了，但模型没有给出任何内容。", label)
+	}
+	slog.Info("scheduled task finished", "label", label, "chars", len([]rune(text)), "files", len(r.Files))
+	if text != "" {
+		a.send(ctx, chat, text)
+	}
 	a.deliverFiles(ctx, chat, r.Files)
 }

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,5 +72,24 @@ func TestSendFileUsesPhotoForSmallImagesAndDocumentOtherwise(t *testing.T) {
 	err := New("1:SECRET", bad.URL).SendFile(context.Background(), 1, "x", "text/plain", []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "too big") || strings.Contains(err.Error(), "SECRET") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestSetCommandsScopesToTheChat(t *testing.T) {
+	var got map[string]any
+	var method string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		json.NewDecoder(r.Body).Decode(&got)
+		w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer srv.Close()
+	c := New("TOKEN", srv.URL)
+	if err := c.SetCommands(context.Background(), 42, []BotCommand{{Command: "help", Description: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	scope := got["scope"].(map[string]any)
+	if method != "setMyCommands" || scope["type"] != "chat" || scope["chat_id"].(float64) != 42 || len(got["commands"].([]any)) != 1 {
+		t.Fatalf("%s %v", method, got)
 	}
 }

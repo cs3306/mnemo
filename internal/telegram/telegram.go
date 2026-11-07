@@ -122,6 +122,19 @@ func (c *Client) Send(ctx context.Context, chat int64, text string) error {
 	return nil
 }
 
+// BotCommand is one entry of the "/" menu Telegram shows next to the message box.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// SetCommands publishes the command menu for one private chat (so only that user sees it).
+func (c *Client) SetCommands(ctx context.Context, chat int64, cmds []BotCommand) error {
+	return c.call(ctx, "setMyCommands", map[string]any{
+		"commands": cmds, "scope": map[string]any{"type": "chat", "chat_id": chat},
+	}, nil)
+}
+
 // SendFile uploads a file as a photo (small images) or a document. name is shown to the recipient.
 func (c *Client) SendFile(ctx context.Context, chat int64, name, mime string, data []byte) error {
 	method, field := "sendDocument", "document"

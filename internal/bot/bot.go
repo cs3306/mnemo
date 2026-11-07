@@ -45,6 +45,41 @@ const help = `可用命令：
 const describePrompt = "请完整转写图片中的文字；数学公式用 LaTeX 写出，看不清或不确定的符号用 [?] 标出，不要猜。" +
 	"转写之后，用一两句话客观描述图片内容。只输出转写与描述。"
 
+// commandMenu is what Telegram shows when the user types "/" or taps the menu button. Commands that change
+// a lot at once (/consolidate, /reembed) or need an argument to be useful (/unpin) stay out of it so that a
+// stray tap does nothing heavy; /help lists everything. Every entry must also appear in help (tested).
+var commandMenu = []telegram.BotCommand{
+	{Command: "help", Description: "查看所有命令"},
+	{Command: "memory", Description: "查看记忆（后面加关键词可检索）"},
+	{Command: "forget", Description: "删除一条记忆：/forget <id>"},
+	{Command: "edit", Description: "修改一条记忆：/edit <id> <新内容>"},
+	{Command: "profile", Description: "查看核心档案"},
+	{Command: "learning", Description: "查看学习进度"},
+	{Command: "pin", Description: "把我刚才的回复固定为说话风格示例"},
+	{Command: "pins", Description: "查看风格示例"},
+	{Command: "status", Description: "后端、记忆与 token 用量"},
+	{Command: "balance", Description: "DeepSeek 账户余额"},
+	{Command: "plugins", Description: "查看插件工具"},
+	{Command: "visiontest", Description: "检测读图模型是否真的能读图"},
+}
+
+// CommandSetter is implemented by the real Telegram client; test fakes may skip it.
+type CommandSetter interface {
+	SetCommands(ctx context.Context, chat int64, cmds []telegram.BotCommand) error
+}
+
+func (a *App) registerCommands(ctx context.Context) {
+	cs, ok := a.tg.(CommandSetter)
+	if !ok {
+		return
+	}
+	for id := range a.cfg.AllowedIDs {
+		if err := cs.SetCommands(ctx, id, commandMenu); err != nil {
+			slog.Warn("cannot publish the command menu", "chat", id, "err", err)
+		}
+	}
+}
+
 // Messenger is the part of the Telegram client the bot needs (fakeable in tests).
 type Messenger interface {
 	Updates(ctx context.Context, offset int64, timeoutSec int) ([]telegram.Update, error)
@@ -205,6 +240,7 @@ func (a *App) Run(ctx context.Context) error {
 		return nil
 	}
 	slog.Info("bot started", "allowed_users", len(a.cfg.AllowedIDs))
+	a.goBG(func() { a.registerCommands(ctx) })
 	for ctx.Err() == nil {
 		ups, err := a.tg.Updates(ctx, offset, 50)
 		if err != nil {

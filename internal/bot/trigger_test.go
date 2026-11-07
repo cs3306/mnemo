@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"companion/internal/telegram"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -77,5 +79,51 @@ func TestTriggerValidation(t *testing.T) {
 	}
 	if len(chat.Calls) != 0 {
 		t.Fatal("rejected requests must not reach the model")
+	}
+}
+
+func TestEmptyScheduledReplyIsReported(t *testing.T) {
+	srv, app, chat := apiApp(t)
+	tg := app.tg.(*fakeTG)
+	chat.Replies = []string{"   "}
+	triggerPost(t, srv, "secret", `{"prompt":"x","label":"空任务"}`)
+	app.Wait()
+	if !strings.Contains(tg.last(), "空任务") {
+		t.Fatalf("user must hear about an empty result, got %q", tg.last())
+	}
+}
+
+type menuTG struct {
+	fakeTG
+	chats []int64
+	cmds  []telegram.BotCommand
+}
+
+func (m *menuTG) SetCommands(_ context.Context, chat int64, cmds []telegram.BotCommand) error {
+	m.chats = append(m.chats, chat)
+	m.cmds = cmds
+	return nil
+}
+
+func TestCommandMenuIsPublishedForAllowedUsersOnly(t *testing.T) {
+	app, _, _, _ := newApp(t, "42")
+	m := &menuTG{}
+	app.tg = m
+	app.registerCommands(context.Background())
+	if len(m.chats) != 1 || m.chats[0] != 42 {
+		t.Fatalf("menu published for %v", m.chats)
+	}
+	seen := map[string]bool{}
+	for _, c := range commandMenu {
+		if seen[c.Command] || c.Command != strings.ToLower(c.Command) || len(c.Description) == 0 || len([]rune(c.Description)) > 256 {
+			t.Errorf("bad menu entry %+v", c)
+		}
+		seen[c.Command] = true
+		if !strings.Contains(help, "/"+c.Command) && c.Command != "help" {
+			t.Errorf("/%s is in the menu but not in /help", c.Command)
+		}
+	}
+	if len(commandMenu) > 100 {
+		t.Fatal("Telegram allows at most 100 commands")
 	}
 }

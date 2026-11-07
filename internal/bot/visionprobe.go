@@ -28,7 +28,7 @@ const (
 )
 
 var errVisionBad = errors.New("读图模型自检未通过：它没能读出测试图里的数字，转写内容会是编造的。" +
-	"请把 VISION_MODEL 换成支持图片输入的模型（例如 deepseek-flash），改好后发 /visiontest 重新检测")
+	"请把 VISION_MODEL 换成支持图片输入的模型；改好后发 /visiontest 重新检测（偶发读错也会触发，可以多测几次）")
 
 const probePrompt = "图片里是一串数字。请只输出这串数字，不要输出别的。"
 

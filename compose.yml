@@ -1,0 +1,47 @@
+services:
+  companion:
+    build: .
+    image: companion:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - companion-data:/data      # named volume: works the same inside nested Docker
+    # Telegram uses outbound long polling only. The optional HTTP API (API_ADDR=:8088) is published on
+    # loopback by default; set API_BIND=0.0.0.0 only behind a reverse proxy/VPN.
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8088}:8088"
+    # No docker.sock, no privileges.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Optional: local embeddings (CPU). Enable with: docker compose --profile local-embed up -d
+  # Then set EMBED_BASE_URL=http://local-embed:8080/v1 and EMBED_MODEL=bge-m3. Flags/tags: verify against llama.cpp docs.
+  local-embed:
+    profiles: ["local-embed"]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    restart: unless-stopped
+    command: ["-m", "/models/bge-m3-q8_0.gguf", "--embeddings", "--pooling", "cls", "--host", "0.0.0.0", "--port", "8080"]
+    volumes:
+      - ./models:/models:ro
+
+  # Optional: local chat model (AMD Vulkan). Enable with: --profile local-llm. Verify image tag/flags for your GPU.
+  local-llm:
+    profiles: ["local-llm"]
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    restart: unless-stopped
+    command: ["-m", "/models/${LOCAL_MODEL_FILE:-model.gguf}", "--mmproj", "/models/${LOCAL_MMPROJ_FILE:-mmproj.gguf}",
+              "-ngl", "99", "-fa", "on", "--jinja", "-c", "16384", "--host", "0.0.0.0", "--port", "8080"]
+    devices: ["/dev/dri:/dev/dri"]
+    volumes:
+      - ./models:/models:ro
+
+volumes:
+  companion-data:

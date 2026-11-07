@@ -1,0 +1,11 @@
+# For environments where Docker cannot reach any registry for golang: build the binary outside
+# (`make release`), then:  docker build -f Dockerfile.prebuilt --build-arg BASE_IMAGE=<your base> -t companion .
+ARG BASE_IMAGE=gcr.io/distroless/static-debian12:nonroot
+FROM ${BASE_IMAGE}
+ARG TARGETARCH=amd64
+COPY --chown=65532:65532 dist/companion-linux-${TARGETARCH} /companion
+ENV DATA_DIR=/data
+VOLUME ["/data"]
+USER 65532:65532
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 CMD ["/companion", "healthcheck"]
+ENTRYPOINT ["/companion"]

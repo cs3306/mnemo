@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"companion/internal/assets"
@@ -29,7 +30,7 @@ const help = `可用命令：
 /memory [关键词]  查看记忆（带关键词则按相关度检索）
 /forget <id>  永久删除一条记忆
 /edit <id> <新内容>  修改一条记忆
-/profile  查看核心档案；/profile set <内容> 手动设置
+/profile  查看核心档案；/profile set <内容> 手动设置；/profile reload 从 profile.md 重新载入
 /learning  查看学习进度
 /pin  把我刚才的回复固定为“说话风格示例”（换模型后用来保持语气）
 /pins  查看风格示例；/unpin <序号> 取消
@@ -37,6 +38,7 @@ const help = `可用命令：
 /consolidate  立即整理记忆（会先自动备份）
 /status  查看后端、记忆与 token 用量（含缓存命中率）
 /balance  查询 DeepSeek 账户余额
+/visiontest  检测读图模型是否真的能读图
 发送图片即可读图（公式、手写、截图）。`
 
 const describePrompt = "请完整转写图片中的文字；数学公式用 LaTeX 写出，看不清或不确定的符号用 [?] 标出，不要猜。" +
@@ -61,17 +63,21 @@ type Deps struct {
 }
 
 type App struct {
-	cfg         *config.Config
-	st          *store.Store
-	chat        llm.Completer
-	vision      llm.Completer
-	emb         llm.Embedder
-	mm          *memory.Manager
-	tg          Messenger
-	now         func() time.Time
-	personaPath string
-	tr          *tracker
-	httpc       *http.Client
+	cfg           *config.Config
+	st            *store.Store
+	chat          llm.Completer
+	vision        llm.Completer
+	emb           llm.Embedder
+	mm            *memory.Manager
+	tg            Messenger
+	now           func() time.Time
+	personaPath   string
+	profilePath   string
+	personaWarned atomic.Bool
+	tr            *tracker
+	httpc         *http.Client
+	visionState   atomic.Int32  // visionUnknown / visionOK / visionBad, see visionprobe.go
+	probeCode     func() string // tests override the random probe code
 
 	mu           sync.Mutex
 	chatLocks    map[int64]*sync.Mutex
@@ -88,7 +94,8 @@ func New(cfg *config.Config, d Deps) (*App, error) {
 	}
 	a := &App{
 		cfg: cfg, st: d.Store, chat: d.Chat, vision: d.Vision, emb: d.Embed, tg: d.TG, now: d.Now,
-		personaPath:  filepath.Join(cfg.DataDir, "persona.md"),
+		personaPath:  filepath.Join(cfg.ConfigDir, "persona.md"),
+		profilePath:  filepath.Join(cfg.ConfigDir, "profile.md"),
 		chatLocks:    map[int64]*sync.Mutex{},
 		lastActivity: map[int64]time.Time{},
 		turns:        map[int64]int{},
@@ -109,22 +116,30 @@ func New(cfg *config.Config, d Deps) (*App, error) {
 	return a, nil
 }
 
+// seedFiles creates the example persona.md / profile.md when they live in the data directory (the default).
+// A separate CONFIG_DIR belongs to the user and is never written to: missing files simply mean built-in defaults.
 func (a *App) seedFiles() error {
 	if err := os.MkdirAll(a.cfg.DataDir, 0o700); err != nil {
 		return err
 	}
-	if _, err := os.Stat(a.personaPath); os.IsNotExist(err) {
-		if err := os.WriteFile(a.personaPath, []byte(assets.PersonaExample), 0o600); err != nil {
-			return err
+	if a.cfg.ConfigDir == a.cfg.DataDir {
+		if _, err := os.Stat(a.personaPath); os.IsNotExist(err) {
+			if err := os.WriteFile(a.personaPath, []byte(assets.PersonaExample), 0o600); err != nil {
+				return err
+			}
+		}
+		if _, err := os.Stat(a.profilePath); os.IsNotExist(err) {
+			if err := os.WriteFile(a.profilePath, []byte(assets.ProfileExample), 0o600); err != nil {
+				return err
+			}
 		}
 	}
-	profPath := filepath.Join(a.cfg.DataDir, "profile.md")
-	b, err := os.ReadFile(profPath)
-	if os.IsNotExist(err) {
-		return os.WriteFile(profPath, []byte(assets.ProfileExample), 0o600)
-	}
+	b, err := os.ReadFile(a.profilePath)
 	if err != nil {
-		return err
+		if !os.IsNotExist(err) {
+			slog.Warn("cannot read profile.md; check its permissions (the container user needs read access, e.g. chmod 644)", "err", err)
+		}
+		return nil
 	}
 	// Seed the core profile only from a profile.md the user actually edited (not the placeholder).
 	text := strings.TrimSpace(string(b))
@@ -132,6 +147,19 @@ func (a *App) seedFiles() error {
 		return a.st.SetCore(text, "seed from profile.md")
 	}
 	return nil
+}
+
+// loadPersona reads persona.md on every turn, so edits take effect on the next message. A missing or
+// unreadable file falls back to the built-in example persona.
+func (a *App) loadPersona() string {
+	b, err := os.ReadFile(a.personaPath)
+	if err == nil {
+		return string(b)
+	}
+	if !os.IsNotExist(err) && a.personaWarned.CompareAndSwap(false, true) {
+		slog.Warn("cannot read persona.md; using the built-in default persona (check file permissions, e.g. chmod 644)", "err", err)
+	}
+	return assets.PersonaExample
 }
 
 // ---------------------------------------------------------------- main loop
@@ -151,6 +179,9 @@ func (a *App) Run(ctx context.Context) error {
 				}
 			}
 		})
+	}
+	if a.vision != nil && a.cfg.VisionProbe {
+		a.goBG(func() { a.startupProbe(ctx) })
 	}
 	if a.cfg.APIAddr != "" {
 		a.goBG(func() {
@@ -360,6 +391,9 @@ func (a *App) describeImages(ctx context.Context, imgs []Image) (string, error) 
 	if a.vision == nil {
 		return "", errVisionOff
 	}
+	if a.visionState.Load() == visionBad {
+		return "", errVisionBad
+	}
 	var parts []string
 	for _, im := range imgs {
 		desc, err := a.vision.Complete(ctx, []llm.Message{llm.Image(describePrompt, im.Data, im.Mime)}, 0.1)
@@ -425,10 +459,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 		slog.Warn("memory retrieval failed; continuing without memories", "err", err)
 		mems = nil
 	}
-	persona := prompt.DefaultPersona
-	if b, err := os.ReadFile(a.personaPath); err == nil {
-		persona = string(b)
-	}
+	persona := a.loadPersona()
 	var recent []store.Message
 	for _, m := range a.st.Unsummarized(chat) {
 		if m.ID != userID {
@@ -663,6 +694,24 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 		}
 		reply(fmt.Sprintf("已更新记忆 #%d。", id))
 	case "/profile":
+		if strings.TrimSpace(rest) == "reload" {
+			b, err := os.ReadFile(a.profilePath)
+			if err != nil {
+				reply("读取 profile.md 失败：" + truncate(err.Error(), 200))
+				return
+			}
+			text := strings.TrimSpace(string(b))
+			if text == "" || text == strings.TrimSpace(assets.ProfileExample) {
+				reply("profile.md 还是空白模板，请先填好再 /profile reload。")
+				return
+			}
+			if err := a.st.SetCore(text, "reload profile.md"); err != nil {
+				reply("保存失败：" + truncate(err.Error(), 200))
+				return
+			}
+			reply("核心档案已从 profile.md 重新载入。")
+			return
+		}
 		if after, ok := strings.CutPrefix(rest, "set "); ok {
 			if err := a.st.SetCore(strings.TrimSpace(after), "manual"); err != nil {
 				reply("保存失败：" + truncate(err.Error(), 200))
@@ -764,6 +813,16 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 			}
 		}
 		reply(out)
+	case "/visiontest":
+		if a.vision == nil {
+			reply(errVisionOff.Error())
+			return
+		}
+		if err := a.probeVision(ctx); err != nil {
+			reply("读图自检未通过：" + truncate(err.Error(), 300))
+			return
+		}
+		reply("读图自检通过：模型能读出测试图里的数字。")
 	case "/balance":
 		b, ok := a.chat.(interface {
 			Balance(context.Context) (string, error)

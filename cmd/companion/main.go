@@ -13,6 +13,7 @@ import (
 	"time"
 	_ "time/tzdata" // embed the zone database so TZ works in scratch/distroless images
 
+	"companion/internal/assets"
 	"companion/internal/bot"
 	"companion/internal/config"
 	"companion/internal/llm"
@@ -29,6 +30,7 @@ const usage = `usage: companion [command]
   healthcheck   exit 0 if the bot polled Telegram recently (for container health checks)
   export [file] write a model-independent JSON snapshot of memories (no vectors) to file or stdout
   import <file> import such a snapshot (stop the bot first); vectors are recomputed
+  defaults <persona|profile>  print the built-in persona.md / profile.md example to stdout
   version`
 
 func main() {
@@ -45,12 +47,28 @@ func main() {
 		os.Exit(export(os.Args[2:]))
 	case "import":
 		os.Exit(importSnapshot(os.Args[2:]))
+	case "defaults":
+		os.Exit(defaults(os.Args[2:]))
 	case "version", "--version":
 		fmt.Println(version)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
+}
+
+func defaults(args []string) int {
+	if len(args) == 1 {
+		switch args[0] {
+		case "persona":
+			fmt.Print(assets.PersonaExample)
+			return 0
+		case "profile":
+			fmt.Print(assets.ProfileExample)
+			return 0
+		}
+	}
+	return fail("usage: companion defaults <persona|profile>")
 }
 
 func fail(format string, a ...any) int {

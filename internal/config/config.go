@@ -23,13 +23,15 @@ type Config struct {
 	TGAPIBase     string
 	AllowedIDs    map[int64]bool
 	DataDir       string
+	ConfigDir     string // user-editable persona.md / profile.md; defaults to DataDir
 	TZ            string
 	Loc           *time.Location
 
-	LLM    Endpoint
-	Maint  Endpoint
-	Vision *Endpoint // nil when image reading is disabled
-	Embed  Endpoint
+	LLM         Endpoint
+	Maint       Endpoint
+	Vision      *Endpoint // nil when image reading is disabled
+	VisionProbe bool      // check at startup that the vision model really reads images
+	Embed       Endpoint
 
 	Temperature      float64
 	RecentTokens     int
@@ -163,12 +165,14 @@ func Load(getenv func(string) string) (*Config, error) {
 		loc = time.UTC
 	}
 	c.Loc = loc
+	c.ConfigDir = e.str("CONFIG_DIR", c.DataDir)
 
 	c.LLM = e.endpoint("LLM", nil)
 	c.Maint = e.endpoint("MAINT", &c.LLM)
 	if e.boolean("VISION_ENABLED", false) {
 		v := e.endpoint("VISION", &c.LLM)
 		c.Vision = &v
+		c.VisionProbe = e.boolean("VISION_PROBE", true)
 	}
 	c.Embed = e.endpoint("EMBED", nil)
 

@@ -226,6 +226,9 @@ func (a *App) toolText(ctx context.Context, raw json.RawMessage) (string, error)
 		if errors.Is(err, errVisionOff) {
 			return "", &httpErr{400, err.Error()}
 		}
+		if errors.Is(err, errVisionBad) {
+			return "", &httpErr{503, err.Error()}
+		}
 		if err != nil {
 			return "", err
 		}
@@ -286,6 +289,9 @@ func (a *App) memoryChat(ctx context.Context, r *http.Request, req chatReq) (Rep
 	reply, err := a.RespondTools(ctx, chat, strings.TrimSpace(text), imgs, TurnOpts{Tools: req.Tools, Tail: tail})
 	if errors.Is(err, errVisionOff) {
 		return Reply{}, &httpErr{400, err.Error()}
+	}
+	if errors.Is(err, errVisionBad) {
+		return Reply{}, &httpErr{503, err.Error()}
 	}
 	return reply, err
 }

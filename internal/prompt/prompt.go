@@ -98,7 +98,8 @@ func Build(in Input) []llm.Message {
 	if len(in.Learning) > 0 {
 		blocks = append(blocks, "[学习进度]\n"+FormatLearning(in.Learning)+"\n[/学习进度]")
 	}
-	blocks = append(blocks, fmt.Sprintf("[当前时间：%s %s]", in.Now.Format("2006-01-02 15:04"), in.Now.Weekday()))
+	blocks = append(blocks, fmt.Sprintf("[当前时间：%s %s，时区 %s（UTC%s）。这是用户所在地的时间，不要凭语言猜时区，也不要为了查时间去联网搜索]",
+		in.Now.Format("2006-01-02 15:04"), in.Now.Weekday(), in.Now.Location(), in.Now.Format("-07:00")))
 	current := strings.Join(blocks, "\n") + "\n\n" + in.UserText
 
 	msgs := make([]llm.Message, 0, len(hist)+2)

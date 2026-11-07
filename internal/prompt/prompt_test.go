@@ -42,3 +42,17 @@ func TestLayoutIsCacheFriendly(t *testing.T) {
 		t.Fatal("expected recent history before the last message")
 	}
 }
+
+func TestCurrentTimeStatesTheZone(t *testing.T) {
+	loc, err := time.LoadLocation("America/Vancouver")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	msgs := Build(Input{Persona: "P", Now: time.Date(2026, 11, 7, 15, 24, 0, 0, loc), UserText: "hi"})
+	last := text(msgs[len(msgs)-1])
+	for _, w := range []string{"2026-11-07 15:24", "Saturday", "America/Vancouver", "UTC-0"} {
+		if !strings.Contains(last, w) {
+			t.Fatalf("time block missing %q:\n%s", w, last)
+		}
+	}
+}

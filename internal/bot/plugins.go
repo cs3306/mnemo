@@ -28,6 +28,7 @@ const (
 	pluginMaxResponse   = 96 << 20
 	pluginMaxFile       = 40 << 20
 	pluginMaxFiles      = 8
+	pluginMaxNotify     = 1000
 	pluginMaxText       = 8000
 	pluginRetryInterval = 60 * time.Second
 	pluginDiscoverTO    = 8 * time.Second
@@ -261,6 +262,7 @@ type turnState struct {
 	chat    int64
 	deliver bool // the frontend can send files (Telegram with a file-capable messenger)
 	files   []OutFile
+	notify  func(string) // sends a message to the user right now (nil: no side channel, e.g. the OpenAI-compatible API)
 }
 
 func (a *App) canSendFiles() bool {
@@ -312,9 +314,10 @@ func (a *App) callPlugin(ctx context.Context, c toolCall, ts *turnState) string 
 		return "插件调用失败：返回内容过大"
 	}
 	var out struct {
-		Text  string `json:"text"`
-		Error string `json:"error"`
-		Files []struct {
+		Text   string `json:"text"`
+		Notify string `json:"notify"` // shown to the user immediately, independent of what the model says afterwards
+		Error  string `json:"error"`
+		Files  []struct {
 			Name string `json:"name"`
 			Mime string `json:"mime"`
 			Data []byte `json:"data"` // base64 in JSON
@@ -330,6 +333,9 @@ func (a *App) callPlugin(ctx context.Context, c toolCall, ts *turnState) string 
 	}
 	if jerr != nil {
 		return "插件调用失败：返回的不是合法 JSON"
+	}
+	if n := strings.TrimSpace(out.Notify); n != "" && ts.notify != nil {
+		ts.notify(truncate(n, pluginMaxNotify))
 	}
 	var notes []string
 	for i, f := range out.Files {

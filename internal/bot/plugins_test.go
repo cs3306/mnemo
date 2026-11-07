@@ -390,3 +390,86 @@ func TestPluginE2E(t *testing.T) {
 		t.Fatalf("files %v", names)
 	}
 }
+
+func TestPluginNoticeReachesTelegramBeforeTheModelReplies(t *testing.T) {
+	p := newFakePlugin(t, "tok", pluginTools)
+	p.handler = func(string, map[string]any) (int, any) {
+		return 200, map[string]any{"text": "已创建", "notify": "✅ 已创建定时任务「晨报」：每天 07:30"}
+	}
+	chat := &testutil.ToolChat{Script: []llm.Result{callTool("make_doc", `{"title":"x"}`), {Text: "好了。"}}}
+	tg := &fileTG{}
+	app := newPluginApp(t, chat, tg, []string{p.URL}, "tok", nil)
+	app.discoverAll(context.Background())
+	app.Handle(context.Background(), msg(42, "每天7:30晨报"))
+	tg.mu.Lock()
+	sent := append([]string(nil), tg.sent...)
+	tg.mu.Unlock()
+	if len(sent) != 2 || sent[0] != "✅ 已创建定时任务「晨报」：每天 07:30" || sent[1] != "好了。" {
+		t.Fatalf("messages: %q", sent)
+	}
+}
+
+func TestPluginNoticeIsNotSentOverTheAPI(t *testing.T) {
+	p := newFakePlugin(t, "", pluginTools)
+	p.handler = func(string, map[string]any) (int, any) {
+		return 200, map[string]any{"text": "ok", "notify": "NOTICE"}
+	}
+	chat := &testutil.ToolChat{Script: []llm.Result{callTool("make_doc", `{"title":"x"}`), {Text: "完成"}}}
+	app, srv, _ := newToolApp(t, chat, nil, func(c *config.Config) { c.PluginURLs, c.MaxToolRounds = []string{p.URL}, 4 })
+	tg := &fakeTG{}
+	app.tg = tg
+	decode(t, post(t, srv, "secret", `{"messages":[{"role":"user","content":"x"}]}`))
+	if len(tg.sent) != 0 {
+		t.Fatalf("API turns must not message Telegram: %q", tg.sent)
+	}
+}
+
+func TestAnnouncedButNotDoneActionIsNudgedOnceAndNeverShown(t *testing.T) {
+	p := newFakePlugin(t, "tok", pluginTools)
+	p.handler = func(string, map[string]any) (int, any) { return 200, map[string]any{"text": "已创建"} }
+	chat := &testutil.ToolChat{Script: []llm.Result{
+		{Text: "好，我建个定时任务，建完告诉你。稍等。"},
+		callTool("make_doc", `{"title":"x"}`),
+		{Text: "建好了：每天 07:30。"},
+	}}
+	tg := &fileTG{}
+	app := newPluginApp(t, chat, tg, []string{p.URL}, "tok", nil)
+	app.discoverAll(context.Background())
+	app.Handle(context.Background(), msg(42, "每天7:30给我晨报"))
+	tg.mu.Lock()
+	sent := append([]string(nil), tg.sent...)
+	tg.mu.Unlock()
+	if len(sent) != 1 || sent[0] != "建好了：每天 07:30。" {
+		t.Fatalf("user must only see the real outcome: %q", sent)
+	}
+	if len(chat.Calls) != 3 || !strings.Contains(joinContents(chat.Calls[1]), "没有调用任何工具") {
+		t.Fatalf("model was not nudged: %d calls", len(chat.Calls))
+	}
+	for _, m := range app.st.MessagesAfter(42, 0, 50) {
+		if strings.Contains(m.Content, "稍等") || strings.Contains(m.Content, "没有调用任何工具") {
+			t.Fatalf("announcement/nudge leaked into history: %q", m.Content)
+		}
+	}
+}
+
+func TestNudgeHappensAtMostOnceAndNotForReportsOrWithoutTools(t *testing.T) {
+	for _, s := range []string{"我写了一份总结，放在上面。", "这个公式的推导很直接。", "我做的是加权平均。"} {
+		if promisesAction(s) {
+			t.Errorf("false positive: %q", s)
+		}
+	}
+	for _, s := range []string{"好，我建个定时任务，稍等", "我这就去搜索一下", "做完告诉你", "完成后通知你"} {
+		if !promisesAction(s) {
+			t.Errorf("missed: %q", s)
+		}
+	}
+	p := newFakePlugin(t, "tok", pluginTools)
+	chat := &testutil.ToolChat{Script: []llm.Result{{Text: "稍等，我去搜索一下。"}}} // keeps promising
+	tg := &fileTG{}
+	app := newPluginApp(t, chat, tg, []string{p.URL}, "tok", nil)
+	app.discoverAll(context.Background())
+	app.Handle(context.Background(), msg(42, "查一下"))
+	if len(chat.Calls) != 2 || tg.last() != "稍等，我去搜索一下。" {
+		t.Fatalf("calls=%d last=%q (one nudge, then the reply goes out)", len(chat.Calls), tg.last())
+	}
+}

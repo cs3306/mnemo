@@ -546,6 +546,9 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 
 	a.ensurePlugins(ctx)
 	ts := &turnState{chat: chat, deliver: opts.Deliver && a.canSendFiles()}
+	if opts.Deliver {
+		ts.notify = func(s string) { a.send(ctx, chat, s) }
+	}
 	tools, err := a.mergeTools(opts.Tools)
 	if err != nil {
 		return Reply{}, err
@@ -559,6 +562,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 	}
 	rounds := countRounds(opts.Tail)
 	var res llm.Result
+	nudged := false
 	for {
 		limited := rounds >= a.cfg.MaxToolRounds
 		if limited {
@@ -574,6 +578,12 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 			return Reply{}, err
 		}
 		if len(res.ToolCalls) == 0 {
+			if len(tools) > 0 && !nudged && !limited && promisesAction(res.Text) {
+				nudged = true // once per turn; the announcement itself is never shown or stored
+				slog.Info("model announced an action without calling a tool; nudging")
+				msgs = append(msgs, llm.Message{Role: "assistant", Content: res.Text, ReasoningContent: res.Reasoning}, llm.Text("system", noActionNudge))
+				continue
+			}
 			break
 		}
 		if limited {

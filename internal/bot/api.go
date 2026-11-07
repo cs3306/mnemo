@@ -27,6 +27,7 @@ const rawSuffix = "-raw"
 //	                            model "<name>-raw" = plain pass-through to the chat backend (no memory)
 //	GET  /v1/models
 //	GET  /v1/memory?q=…         list/search memories      DELETE /v1/memory/{id}
+//	POST /v1/trigger            start a turn in the Telegram conversation: {"prompt","label","chat"?} (scheduled tasks)
 //	GET  /healthz               (no auth)
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -35,6 +36,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", a.auth(a.apiChat))
 	mux.HandleFunc("GET /v1/memory", a.auth(a.apiMemoryList))
 	mux.HandleFunc("DELETE /v1/memory/{id}", a.auth(a.apiMemoryDelete))
+	mux.HandleFunc("POST /v1/trigger", a.auth(a.apiTrigger))
 	return mux
 }
 

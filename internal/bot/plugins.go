@@ -19,7 +19,7 @@ import (
 // Tool plugins are separate HTTP services (any language) that expose tools to the model.
 //
 //	GET  {base}/v1/tools              -> {"tools":[{"name","description","parameters":<JSON Schema object>}]}
-//	POST {base}/v1/tools/{name}       <- {"arguments":{...},"context":{"chat":123,"channel":"telegram"|"api"}}
+//	POST {base}/v1/tools/{name}       <- {"arguments":{...},"context":{"chat":123,"channel":"telegram"|"api","tz":"America/Vancouver"}}
 //	                                  -> {"text":"...","files":[{"name","mime","data":"<base64>"}]}  (or {"error":"..."})
 //
 // Every request carries "Authorization: Bearer $PLUGIN_TOKEN" when PLUGIN_TOKEN is set. Files are delivered to the
@@ -292,7 +292,7 @@ func (a *App) callPlugin(ctx context.Context, c toolCall, ts *turnState) string 
 	if ts.deliver {
 		channel = "telegram"
 	}
-	body, _ := json.Marshal(map[string]any{"arguments": args, "context": map[string]any{"chat": ts.chat, "channel": channel}})
+	body, _ := json.Marshal(map[string]any{"arguments": args, "context": map[string]any{"chat": ts.chat, "channel": channel, "tz": a.cfg.Loc.String()}})
 	cctx, cancel := context.WithTimeout(ctx, a.cfg.PluginTimeout)
 	defer cancel()
 	req, err := a.pluginReq(cctx, http.MethodPost, t.base+"/v1/tools/"+c.Function.Name, body)

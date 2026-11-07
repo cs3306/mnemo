@@ -404,6 +404,10 @@ type TurnOpts struct {
 	Tail  []llm.Message   // the client's messages after the user message: assistant tool_calls + tool results
 
 	Deliver bool // the frontend can send files produced by plugin tools (Telegram)
+
+	// Instruction makes this a scheduled turn: nobody just spoke. The text is shown to the model as the latest
+	// message but is never stored as something the user said; only the reply joins the conversation.
+	Instruction string
 }
 
 // Reply is a final text answer, or (ToolCalls set) a request for the client to run tools and call again.
@@ -450,14 +454,16 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 	var composed string
 	var userID int64
 	cont := false
-	if len(opts.Tail) > 0 {
+	if len(opts.Tail) > 0 && opts.Instruction == "" {
 		if u, ok := a.st.LastByRole(chat, "user", 0); ok {
 			if as, hasA := a.st.LastByRole(chat, "assistant", 0); !hasA || as.ID < u.ID {
 				composed, userID, cont = u.Content, u.ID, true
 			}
 		}
 	}
-	if !cont {
+	if opts.Instruction != "" {
+		composed = opts.Instruction
+	} else if !cont {
 		composed = text
 		if len(imgs) > 0 {
 			desc, err := a.describeImages(ctx, imgs)

@@ -1,0 +1,273 @@
+diff --git a/README.md b/README.md
+index 2929fc0..139e7fc 100644
+--- a/README.md
++++ b/README.md
+@@ -111,6 +111,8 @@ PLUGIN_TIMEOUT=180                         # 单次工具调用的秒数
+ 
+ 启动时 mnemo 向每个服务 `GET /v1/tools` 获取工具清单并交给模型；模型调用时转发为 `POST /v1/tools/{name}`。工具返回的文件在 Telegram 里作为文档/图片发送；通过 OpenAI 兼容 API 访问时没有文件通道，文件会被丢弃，并告知模型。服务暂时连不上不影响对话，之后每分钟重试一次；`/plugins` 查看状态，`/plugins reload` 立即重新发现。协议（几十行就能实现）与官方插件服务见 [mnemo-plugin](https://github.com/cs3306/mnemo-plugin)。工具名不能与内置的 `web_search` / `web_fetch` 重名。
+ 
++**定时触发**：开启 API（`API_ADDR` + `API_KEY`）后，`POST /v1/trigger`（`{"prompt":"…","label":"晨报"}`，Bearer 鉴权）会立刻返回 202，并在 Telegram 对话里以“定时任务”的方式跑一轮（带人设、记忆、搜索与插件工具），结果发给你。这一轮的指令不会被存成你说过的话，只保存回复。mnemo-plugin 的 `schedule_*` 工具就是用它实现“对 bot 说一句话就能设每天的晨报”的。不要把该端口暴露到公网。
++
+ ### 用量与费用
+ 每次调用的 token 用量（含 DeepSeek 的缓存命中/未命中）按“对话/后台整理/读图”累计保存。`/status` 显示次数、输入、缓存命中率、输出；设置 `PRICE_*` 后还会显示估算费用（不区分高峰/空闲时段，仅作参考）。`/balance` 查询 DeepSeek 余额。
+ 最近原文窗口按批裁剪（滚动摘要在 125% 时一次裁到 60%），而不是每轮丢一条，以保持提示前缀稳定、提高缓存命中；`RECENT_TOKENS` 是目标值，实际窗口在约 60%–125% 之间波动。
+@@ -293,6 +295,8 @@ PLUGIN_TIMEOUT=180                         # seconds per tool call
+ 
+ At startup mnemo calls `GET /v1/tools` on each server and offers those tools to the model; a call is forwarded as `POST /v1/tools/{name}`. Files a tool returns are sent as documents/photos on Telegram; over the OpenAI-compatible API there is no file channel, so they are dropped and the model is told. A server that is down does not stop the conversation and is retried once a minute; `/plugins` shows the status, `/plugins reload` re-discovers immediately. The protocol (a few dozen lines to implement) and the reference plugin server live in [mnemo-plugin](https://github.com/cs3306/mnemo-plugin). Tool names must not collide with the built-in `web_search` / `web_fetch`.
+ 
++**Scheduled triggers**: with the API enabled (`API_ADDR` + `API_KEY`), `POST /v1/trigger` (`{"prompt":"…","label":"Morning brief"}`, bearer auth) returns 202 at once and runs one turn in the Telegram conversation as a "scheduled task" (persona, memory, search and plugin tools all available) and sends you the result. The instruction is not stored as something you said; only the reply is. mnemo-plugin's `schedule_*` tools use this so you can tell the bot "brief me every day at 7:30". Do not expose that port to the internet.
++
+ ### Usage and cost
+ Token usage of every call (including DeepSeek cache hit/miss) is accumulated per kind: chat / background maintenance / vision. `/status` shows call count, input, cache hit rate and output; with `PRICE_*` set it also shows an estimated cost (it does not distinguish peak from off-peak hours, for reference only). `/balance` queries your DeepSeek balance.
+ The recent-message window is trimmed in batches (the rolling summary cuts from 125% down to 60% in one go) instead of dropping one message per turn, which keeps the prompt prefix stable and improves cache hits. `RECENT_TOKENS` is a target; the actual window fluctuates between roughly 60% and 125% of it.
+diff --git a/internal/bot/api.go b/internal/bot/api.go
+index 034c7a1..9a58274 100644
+--- a/internal/bot/api.go
++++ b/internal/bot/api.go
+@@ -27,6 +27,7 @@ const rawSuffix = "-raw"
+ //	                            model "<name>-raw" = plain pass-through to the chat backend (no memory)
+ //	GET  /v1/models
+ //	GET  /v1/memory?q=…         list/search memories      DELETE /v1/memory/{id}
++//	POST /v1/trigger            start a turn in the Telegram conversation: {"prompt","label","chat"?} (scheduled tasks)
+ //	GET  /healthz               (no auth)
+ func (a *App) Handler() http.Handler {
+ 	mux := http.NewServeMux()
+@@ -35,6 +36,7 @@ func (a *App) Handler() http.Handler {
+ 	mux.HandleFunc("POST /v1/chat/completions", a.auth(a.apiChat))
+ 	mux.HandleFunc("GET /v1/memory", a.auth(a.apiMemoryList))
+ 	mux.HandleFunc("DELETE /v1/memory/{id}", a.auth(a.apiMemoryDelete))
++	mux.HandleFunc("POST /v1/trigger", a.auth(a.apiTrigger))
+ 	return mux
+ }
+ 
+diff --git a/internal/bot/bot.go b/internal/bot/bot.go
+index e713546..e478431 100644
+--- a/internal/bot/bot.go
++++ b/internal/bot/bot.go
+@@ -404,6 +404,10 @@ type TurnOpts struct {
+ 	Tail  []llm.Message   // the client's messages after the user message: assistant tool_calls + tool results
+ 
+ 	Deliver bool // the frontend can send files produced by plugin tools (Telegram)
++
++	// Instruction makes this a scheduled turn: nobody just spoke. The text is shown to the model as the latest
++	// message but is never stored as something the user said; only the reply joins the conversation.
++	Instruction string
+ }
+ 
+ // Reply is a final text answer, or (ToolCalls set) a request for the client to run tools and call again.
+@@ -450,14 +454,16 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
+ 	var composed string
+ 	var userID int64
+ 	cont := false
+-	if len(opts.Tail) > 0 {
++	if len(opts.Tail) > 0 && opts.Instruction == "" {
+ 		if u, ok := a.st.LastByRole(chat, "user", 0); ok {
+ 			if as, hasA := a.st.LastByRole(chat, "assistant", 0); !hasA || as.ID < u.ID {
+ 				composed, userID, cont = u.Content, u.ID, true
+ 			}
+ 		}
+ 	}
+-	if !cont {
++	if opts.Instruction != "" {
++		composed = opts.Instruction
++	} else if !cont {
+ 		composed = text
+ 		if len(imgs) > 0 {
+ 			desc, err := a.describeImages(ctx, imgs)
+diff --git a/internal/bot/plugins.go b/internal/bot/plugins.go
+index 57c8bf5..8f38fbe 100644
+--- a/internal/bot/plugins.go
++++ b/internal/bot/plugins.go
+@@ -19,7 +19,7 @@ import (
+ // Tool plugins are separate HTTP services (any language) that expose tools to the model.
+ //
+ //	GET  {base}/v1/tools              -> {"tools":[{"name","description","parameters":<JSON Schema object>}]}
+-//	POST {base}/v1/tools/{name}       <- {"arguments":{...},"context":{"chat":123,"channel":"telegram"|"api"}}
++//	POST {base}/v1/tools/{name}       <- {"arguments":{...},"context":{"chat":123,"channel":"telegram"|"api","tz":"America/Vancouver"}}
+ //	                                  -> {"text":"...","files":[{"name","mime","data":"<base64>"}]}  (or {"error":"..."})
+ //
+ // Every request carries "Authorization: Bearer $PLUGIN_TOKEN" when PLUGIN_TOKEN is set. Files are delivered to the
+@@ -292,7 +292,7 @@ func (a *App) callPlugin(ctx context.Context, c toolCall, ts *turnState) string
+ 	if ts.deliver {
+ 		channel = "telegram"
+ 	}
+-	body, _ := json.Marshal(map[string]any{"arguments": args, "context": map[string]any{"chat": ts.chat, "channel": channel}})
++	body, _ := json.Marshal(map[string]any{"arguments": args, "context": map[string]any{"chat": ts.chat, "channel": channel, "tz": a.cfg.Loc.String()}})
+ 	cctx, cancel := context.WithTimeout(ctx, a.cfg.PluginTimeout)
+ 	defer cancel()
+ 	req, err := a.pluginReq(cctx, http.MethodPost, t.base+"/v1/tools/"+c.Function.Name, body)
+diff --git a/internal/bot/trigger.go b/internal/bot/trigger.go
+new file mode 100644
+index 0000000..577d6c1
+--- /dev/null
++++ b/internal/bot/trigger.go
+@@ -0,0 +1,82 @@
++package bot
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"log/slog"
++	"net/http"
++	"strings"
++	"time"
++)
++
++const (
++	triggerMaxPrompt = 4000
++	triggerMaxLabel  = 60
++	triggerTimeout   = 10 * time.Minute
++)
++
++// apiTrigger starts a turn in the Telegram conversation on behalf of something other than the user (a scheduler plugin,
++// cron, a script): POST /v1/trigger {"prompt": "...", "label": "晨报", "chat": 123}. "chat" defaults to the first
++// allowed user. It answers 202 at once; the reply (and any files tools produced) goes to Telegram when ready.
++func (a *App) apiTrigger(w http.ResponseWriter, r *http.Request) {
++	if a.tg == nil {
++		apiError(w, 409, "no Telegram bot is configured, so there is nowhere to send the result")
++		return
++	}
++	var req struct {
++		Prompt string `json:"prompt"`
++		Label  string `json:"label"`
++		Chat   *int64 `json:"chat"`
++	}
++	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
++		apiError(w, 400, "body must be {\"prompt\": \"...\", \"label\": \"...\"}")
++		return
++	}
++	req.Prompt, req.Label = strings.TrimSpace(req.Prompt), strings.TrimSpace(req.Label)
++	switch {
++	case req.Prompt == "":
++		apiError(w, 400, "prompt is empty")
++		return
++	case len([]rune(req.Prompt)) > triggerMaxPrompt:
++		apiError(w, 400, fmt.Sprintf("prompt is longer than %d characters", triggerMaxPrompt))
++		return
++	}
++	chat := a.defaultChat()
++	if req.Chat != nil {
++		chat = *req.Chat
++	}
++	if !a.cfg.AllowedIDs[chat] {
++		apiError(w, 403, "chat is not an allowed Telegram user")
++		return
++	}
++	if req.Label == "" {
++		req.Label = "定时任务"
++	}
++	label := truncate(strings.ReplaceAll(req.Label, "\n", " "), triggerMaxLabel)
++	a.goBG(func() { a.runScheduled(chat, label, req.Prompt) })
++	w.WriteHeader(http.StatusAccepted)
++	writeJSON(w, map[string]string{"status": "accepted"})
++}
++
++// runScheduled runs one scheduled turn like a normal one (persona, memory, tools, plugins) and sends the result.
++func (a *App) runScheduled(chat int64, label, prompt string) {
++	l := a.chatLock(chat)
++	l.Lock()
++	defer l.Unlock()
++	a.touch(chat)
++	defer a.touch(chat)
++	ctx, cancel := context.WithTimeout(a.bg, triggerTimeout)
++	defer cancel()
++	a.tg.Typing(ctx, chat)
++	instruction := fmt.Sprintf("[定时任务「%s」到点了。这是用户事先设好的任务，不是用户刚刚发来的消息。请直接完成它，像平时聊天一样把结果发给用户；"+
++		"不要说“收到任务”之类的话，也不要把这段说明复述出来。]\n%s", label, prompt)
++	r, err := a.RespondTools(ctx, chat, "", nil, TurnOpts{Instruction: instruction, Deliver: a.canSendFiles()})
++	if err != nil {
++		slog.Warn("scheduled turn failed", "label", label, "err", err)
++		a.send(ctx, chat, fmt.Sprintf("定时任务「%s」没有成功：%s", label, truncate(err.Error(), 200)))
++		return
++	}
++	a.send(ctx, chat, r.Text)
++	a.deliverFiles(ctx, chat, r.Files)
++}
+diff --git a/internal/bot/trigger_test.go b/internal/bot/trigger_test.go
+new file mode 100644
+index 0000000..d0e2c2c
+--- /dev/null
++++ b/internal/bot/trigger_test.go
+@@ -0,0 +1,81 @@
++package bot
++
++import (
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func triggerPost(t *testing.T, srv *httptest.Server, key, body string) *http.Response {
++	t.Helper()
++	req, _ := http.NewRequest("POST", srv.URL+"/v1/trigger", strings.NewReader(body))
++	if key != "" {
++		req.Header.Set("Authorization", "Bearer "+key)
++	}
++	resp, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { resp.Body.Close() })
++	return resp
++}
++
++func TestTriggerRunsScheduledTurnAndStoresOnlyReply(t *testing.T) {
++	srv, app, chat := apiApp(t)
++	tg := app.tg.(*fakeTG)
++	chat.Replies = []string{"早安！今天有三件事。"}
++	if r := triggerPost(t, srv, "secret", `{"prompt":"查今天的新闻，给我晨报","label":"晨报"}`); r.StatusCode != 202 {
++		t.Fatalf("status %d", r.StatusCode)
++	}
++	app.Wait()
++	if got := tg.last(); got != "早安！今天有三件事。" {
++		t.Fatalf("telegram got %q", got)
++	}
++	if len(chat.Calls) == 0 {
++		t.Fatal("model not called")
++	}
++	var prompt string
++	for _, m := range chat.Calls[0] {
++		prompt += fmt.Sprint(m.Content) + "\n"
++	}
++	if !strings.Contains(prompt, "定时任务「晨报」") || !strings.Contains(prompt, "查今天的新闻，给我晨报") {
++		t.Fatalf("instruction missing from prompt:\n%s", prompt)
++	}
++	var user, assistant int
++	for _, m := range app.st.MessagesAfter(42, 0, 100) {
++		switch m.Role {
++		case "user":
++			user++
++		case "assistant":
++			assistant++
++		}
++	}
++	if user != 0 || assistant != 1 {
++		t.Fatalf("stored user=%d assistant=%d, want 0/1", user, assistant)
++	}
++}
++
++func TestTriggerValidation(t *testing.T) {
++	srv, _, chat := apiApp(t)
++	cases := []struct {
++		key, body string
++		want      int
++	}{
++		{"", `{"prompt":"x"}`, 401},
++		{"bad", `{"prompt":"x"}`, 401},
++		{"secret", `not json`, 400},
++		{"secret", `{"prompt":"  "}`, 400},
++		{"secret", `{"prompt":"` + strings.Repeat("字", triggerMaxPrompt+1) + `"}`, 400},
++		{"secret", `{"prompt":"x","chat":7}`, 403},
++	}
++	for _, c := range cases {
++		if r := triggerPost(t, srv, c.key, c.body); r.StatusCode != c.want {
++			t.Errorf("%q -> %d, want %d", c.body[:min(len(c.body), 30)], r.StatusCode, c.want)
++		}
++	}
++	if len(chat.Calls) != 0 {
++		t.Fatal("rejected requests must not reach the model")
++	}
++}

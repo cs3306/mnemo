@@ -111,6 +111,8 @@ PLUGIN_TIMEOUT=180                         # 单次工具调用的秒数
 
 启动时 mnemo 向每个服务 `GET /v1/tools` 获取工具清单并交给模型；模型调用时转发为 `POST /v1/tools/{name}`。工具返回的文件在 Telegram 里作为文档/图片发送；通过 OpenAI 兼容 API 访问时没有文件通道，文件会被丢弃，并告知模型。服务暂时连不上不影响对话，之后每分钟重试一次；`/plugins` 查看状态，`/plugins reload` 立即重新发现。协议（几十行就能实现）与官方插件服务见 [mnemo-plugin](https://github.com/cs3306/mnemo-plugin)。工具名不能与内置的 `web_search` / `web_fetch` 重名。
 
+**定时触发**：开启 API（`API_ADDR` + `API_KEY`）后，`POST /v1/trigger`（`{"prompt":"…","label":"晨报"}`，Bearer 鉴权）会立刻返回 202，并在 Telegram 对话里以“定时任务”的方式跑一轮（带人设、记忆、搜索与插件工具），结果发给你。这一轮的指令不会被存成你说过的话，只保存回复。mnemo-plugin 的 `schedule_*` 工具就是用它实现“对 bot 说一句话就能设每天的晨报”的。不要把该端口暴露到公网。
+
 ### 用量与费用
 每次调用的 token 用量（含 DeepSeek 的缓存命中/未命中）按“对话/后台整理/读图”累计保存。`/status` 显示次数、输入、缓存命中率、输出；设置 `PRICE_*` 后还会显示估算费用（不区分高峰/空闲时段，仅作参考）。`/balance` 查询 DeepSeek 余额。
 最近原文窗口按批裁剪（滚动摘要在 125% 时一次裁到 60%），而不是每轮丢一条，以保持提示前缀稳定、提高缓存命中；`RECENT_TOKENS` 是目标值，实际窗口在约 60%–125% 之间波动。
@@ -292,6 +294,8 @@ PLUGIN_TIMEOUT=180                         # seconds per tool call
 ```
 
 At startup mnemo calls `GET /v1/tools` on each server and offers those tools to the model; a call is forwarded as `POST /v1/tools/{name}`. Files a tool returns are sent as documents/photos on Telegram; over the OpenAI-compatible API there is no file channel, so they are dropped and the model is told. A server that is down does not stop the conversation and is retried once a minute; `/plugins` shows the status, `/plugins reload` re-discovers immediately. The protocol (a few dozen lines to implement) and the reference plugin server live in [mnemo-plugin](https://github.com/cs3306/mnemo-plugin). Tool names must not collide with the built-in `web_search` / `web_fetch`.
+
+**Scheduled triggers**: with the API enabled (`API_ADDR` + `API_KEY`), `POST /v1/trigger` (`{"prompt":"…","label":"Morning brief"}`, bearer auth) returns 202 at once and runs one turn in the Telegram conversation as a "scheduled task" (persona, memory, search and plugin tools all available) and sends you the result. The instruction is not stored as something you said; only the reply is. mnemo-plugin's `schedule_*` tools use this so you can tell the bot "brief me every day at 7:30". Do not expose that port to the internet.
 
 ### Usage and cost
 Token usage of every call (including DeepSeek cache hit/miss) is accumulated per kind: chat / background maintenance / vision. `/status` shows call count, input, cache hit rate and output; with `PRICE_*` set it also shows an estimated cost (it does not distinguish peak from off-peak hours, for reference only). `/balance` queries your DeepSeek balance.

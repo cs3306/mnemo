@@ -1,9 +1,10 @@
 name: docker-build
 
 # Build a multi-arch image and push it to Docker Hub.
-# Triggered by pushing a version tag (v0.1.0) or manually from the Actions tab.
+# Triggered by pushes to main, version tags (v0.1.0), or manually from the Actions tab.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 

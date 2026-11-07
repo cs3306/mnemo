@@ -22,10 +22,41 @@
 ```bash
 cp .env.example .env     # 填 TELEGRAM_TOKEN（@BotFather 给的 bot token）、LLM_*、EMBED_*
 docker compose up -d --build
-docker compose logs -f companion
+docker compose logs -f mnemo
 ```
 `ALLOWED_USER_IDS` 先留空：给 bot 发一句话，它会回你的数字 ID，填回 `.env` 后 `docker compose up -d`。
 没有入站端口（Telegram 长轮询，仅出站）。
+
+### 不用 Docker 直接运行
+程序是单个静态二进制，不依赖 Docker：
+```bash
+make build                                   # 需要 Go ≥ 1.22，产物 bin/companion
+cp .env.example .env                         # 填 TELEGRAM_TOKEN、LLM_*、EMBED_* 等
+set -a; source .env; set +a                  # 程序不会自己读 .env，要先导入环境变量
+export DATA_DIR=$PWD/data CONFIG_DIR=$PWD/config
+mkdir -p "$DATA_DIR" "$CONFIG_DIR"
+./bin/companion defaults persona > config/persona.md   # 可选：取出人设示例，随时编辑
+./bin/companion run
+```
+- `DATA_DIR` 默认是 `/data`（容器内路径），裸机运行必须改到可写目录；同一个数据目录同一时间只能有一个进程，别和 Docker 版同时跑。
+- 用 shell `source` 加载 `.env` 时，含引号的 JSON 值要加单引号：`LLM_EXTRA_BODY='{"thinking":{"type":"disabled"}}'`。Docker Compose 不会去掉引号，两种方式共用一个 `.env` 会冲突，建议分开两个文件。
+- `Ctrl+C` 会正常退出。后台常驻可以用 `nohup ./bin/companion run > mnemo.log 2>&1 &`，或写成 systemd 服务：
+```ini
+[Unit]
+Description=mnemo
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/mnemo
+EnvironmentFile=/opt/mnemo/.env
+Environment=DATA_DIR=/opt/mnemo/data CONFIG_DIR=/opt/mnemo/config
+ExecStart=/opt/mnemo/companion run
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+（systemd 单元只是参考写法，未实测。）
 
 ### HTTP API：把它当“本地模型”接任意前端
 设 `API_ADDR=:8088` 和 `API_KEY=<随机长串>` 后，服务同时提供 OpenAI 兼容接口（此时 `TELEGRAM_TOKEN` 可省略，纯 API 模式）：
@@ -70,7 +101,7 @@ make test                                           # go test -race ./...
 - 不用 Docker：直接运行二进制，`DATA_DIR` 指向任意可写目录。
 
 ### Docker 嵌套 / 访问宿主服务
-- 数据用命名卷 `companion-data`，不依赖宿主路径，嵌套时行为一致。
+- 数据用命名卷 `mnemo-data`，不依赖宿主路径，嵌套时行为一致。
 - 不需要 `docker.sock`、特权或端口；容器以非 root、只读根文件系统、`cap_drop: ALL` 运行。
 - 本地模型在宿主上时用 `host.docker.internal`；**DinD 里它指向外层容器**，请改用局域网 IP。嵌套层通常拿不到 GPU，模型服务建议跑在宿主上。
 - 可选 compose profile：`local-embed`（CPU 嵌入）、`local-llm`（llama.cpp Vulkan）。镜像 tag 和启动参数需按你的 llama.cpp 版本核对。
@@ -95,7 +126,7 @@ docker run --rm <镜像名> defaults profile > config/profile.md
 - 把 `config/` 加进 `.gitignore`，避免把自己的人设提交上去。
 - 不在文件里的内容：`/pin` 的风格示例和记忆在数据卷里，用 `/pins`、`/memory` 管理；`.env` 本来就在宿主机上。
 
-## 换模型后记忆如何延续
+### 换模型后记忆如何延续
 - 记忆是**纯文本**（附 `by_model` 记录是谁写的），与对话模型无关：把 `LLM_*` 从 DeepSeek 改成 Qwen，记忆、档案、摘要、学习进度原样可用。
 - 向量只和**嵌入模型**绑定。若改了 `EMBED_MODEL`，旧向量会被识别为不匹配：期间自动退化为关键词检索，并在启动时（`AUTO_REEMBED=true`）后台重新计算；也可手动 `/reembed`。
 - 迁移/备份：`companion export > mem.json`（不含向量）；在新实例 `companion import mem.json`（需配置 `EMBED_*`，导入时重算向量）。
@@ -123,7 +154,7 @@ Qwen3 系列关闭思考：`LLM_EXTRA_BODY={"chat_template_kwargs":{"enable_thin
 ### 已验证 / 未验证
 已验证（在开发沙箱中）：工具调用往返（含工具结果里的图片转写、历史不含工具噪声）、服务端内置搜索循环与轮数上限、用量/缓存命中解析与 `/status`、提示前缀跨轮稳定、余额解析（均用模拟服务）；HTTP API（鉴权、只取最后一条用户消息、会话共享与隔离、SSE 格式、raw 透传不入库、拒绝远程图片 URL）；`gofmt`、`go vet`、`go test -race`（store 重放/压缩/硬删除/导入导出、LLM 重试与 extra body、嵌入批处理、检索与换嵌入模型后的重嵌入、提示词布局、token 不泄露、bot 白名单与命令）；静态编译 linux/amd64 与 arm64；用 mock Telegram+LLM 端到端跑通真实二进制（收消息→回复→后台抽取记忆→export→healthcheck→SIGTERM 正常退出）；`docker compose config` 通过；`docker build` 已由使用者在本机构建成功。
 
-**未验证**：真实 DeepSeek 的 Search/Fetch、`/user/balance` 鉴权、`thinking` 字段与 tool_calls 的实际响应；对真实 Telegram 服务器的联调；真实 DeepSeek / llama.cpp 的响应细节（DeepSeek 模型名请以官方文档为准）；可选 profile 里 llama.cpp 的镜像 tag 与参数；读图在真实视觉模型上的效果（自检逻辑只用假模型测过）；长期（数周）记忆质量需要你实际使用后评估。
+**未验证**：真实 DeepSeek 的 Search/Fetch、`/user/balance` 鉴权、`thinking` 字段与 tool_calls 的实际响应；对真实 Telegram 服务器的联调；真实 DeepSeek / llama.cpp 的响应细节（DeepSeek 模型名请以官方文档为准）；可选 profile 里 llama.cpp 的镜像 tag 与参数；读图在真实视觉模型上的效果（自检逻辑只用假模型测过）；systemd 单元写法；长期（数周）记忆质量需要你实际使用后评估。
 
 ### 许可
 MIT
@@ -148,10 +179,41 @@ The backend can be any OpenAI-compatible endpoint (DeepSeek API, Qwen on local l
 ```bash
 cp .env.example .env     # fill TELEGRAM_TOKEN (the bot token from @BotFather), LLM_*, EMBED_*
 docker compose up -d --build
-docker compose logs -f companion
+docker compose logs -f mnemo
 ```
 Leave `ALLOWED_USER_IDS` empty at first: send the bot any message, it replies with your numeric ID. Put it in `.env`, then `docker compose up -d`.
 No inbound ports are needed (Telegram long polling, outbound only).
+
+### Running without Docker
+The program is a single static binary and does not need Docker:
+```bash
+make build                                   # needs Go ≥ 1.22, produces bin/companion
+cp .env.example .env                         # fill TELEGRAM_TOKEN, LLM_*, EMBED_*, ...
+set -a; source .env; set +a                  # the program does not read .env itself; export the variables first
+export DATA_DIR=$PWD/data CONFIG_DIR=$PWD/config
+mkdir -p "$DATA_DIR" "$CONFIG_DIR"
+./bin/companion defaults persona > config/persona.md   # optional: extract the example persona and edit it any time
+./bin/companion run
+```
+- `DATA_DIR` defaults to `/data` (the in-container path), so outside a container you must point it at a writable directory. Only one process may use a data directory at a time; do not run it alongside the Docker version.
+- When loading `.env` with a shell `source`, wrap JSON values in single quotes: `LLM_EXTRA_BODY='{"thinking":{"type":"disabled"}}'`. Docker Compose does not strip quotes, so sharing one `.env` between both ways conflicts; keep two files.
+- `Ctrl+C` exits cleanly. To keep it running in the background use `nohup ./bin/companion run > mnemo.log 2>&1 &`, or a systemd service:
+```ini
+[Unit]
+Description=mnemo
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/mnemo
+EnvironmentFile=/opt/mnemo/.env
+Environment=DATA_DIR=/opt/mnemo/data CONFIG_DIR=/opt/mnemo/config
+ExecStart=/opt/mnemo/companion run
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+(The systemd unit is a reference only and has not been tested.)
 
 ### HTTP API: use it as a "local model" for any frontend
 Set `API_ADDR=:8088` and `API_KEY=<long random string>` and the service also exposes an OpenAI-compatible API (`TELEGRAM_TOKEN` may then be omitted for API-only mode):
@@ -196,7 +258,7 @@ make test                                           # go test -race ./...
 - Without Docker: run the binary directly and point `DATA_DIR` at any writable directory.
 
 ### Nested Docker / reaching host services
-- Data uses the named volume `companion-data`, independent of host paths, so behavior is the same when nested.
+- Data uses the named volume `mnemo-data`, independent of host paths, so behavior is the same when nested.
 - No `docker.sock`, privileges or ports needed; the container runs non-root, with a read-only root filesystem and `cap_drop: ALL`.
 - For a local model on the host use `host.docker.internal`. **Inside DinD it points at the outer container**, so use the LAN IP instead. Nested layers usually cannot see the GPU, so run the model server on the host.
 - Optional compose profiles: `local-embed` (CPU embeddings) and `local-llm` (llama.cpp Vulkan). Check image tags and launch flags against your llama.cpp version.
@@ -221,7 +283,7 @@ Add to `compose.yml`:
 - Add `config/` to `.gitignore` so your own persona is not committed.
 - Not file-based: `/pin` style examples and memories live in the data volume (manage them with `/pins`, `/memory`); `.env` is already on the host.
 
-## How memory carries over when you swap models
+### How memory carries over when you swap models
 - Memory is **plain text** (with `by_model` recording who wrote it) and independent of the chat model: change `LLM_*` from DeepSeek to Qwen and memories, profile, summary and learning progress work as before.
 - Vectors are tied only to the **embedding model**. If `EMBED_MODEL` changes, old vectors are detected as mismatched: retrieval falls back to keyword search meanwhile, and re-embeds in the background at startup (`AUTO_REEMBED=true`) or on manual `/reembed`.
 - Migration/backup: `companion export > mem.json` (no vectors); on the new instance `companion import mem.json` (needs `EMBED_*`, vectors are recomputed on import).
@@ -250,7 +312,7 @@ Note: when you load `.env` with a shell `source`, wrap JSON values in single quo
 ### Verified / not verified
 Verified (in the development sandbox, using fake/mock servers): tool-calling round trip (including image transcription in tool results, no tool noise in history), the built-in search loop and its round cap, usage/cache-hit parsing and `/status`, prompt prefix stability across turns, balance parsing; the HTTP API (auth, last-user-message-only, shared and isolated conversations, SSE format, raw pass-through not stored, remote image URLs rejected); `gofmt`, `go vet`, `go test -race` (store replay/compaction/hard delete/import-export, LLM retry and extra body, embedding batching, retrieval and re-embedding after an embedding-model change, prompt layout, tokens not leaked, bot allowlist and commands); static builds for linux/amd64 and arm64; an end-to-end run of the real binary against a mock Telegram + LLM (receive message → reply → background memory extraction → export → healthcheck → clean exit on SIGTERM); `docker compose config` passes; `docker build` has been built successfully by the user on their own machine.
 
-**Not verified**: real DeepSeek Search/Fetch, `/user/balance` auth, and the actual responses for the `thinking` field and tool_calls; integration with the real Telegram servers; real-world DeepSeek / llama.cpp response details (check model names against the official docs); image tags and flags of llama.cpp in the optional profiles; image-reading quality on a real vision model (the self-test logic was only tested with fake models); long-term (weeks) memory quality, which you need to judge from real use.
+**Not verified**: real DeepSeek Search/Fetch, `/user/balance` auth, and the actual responses for the `thinking` field and tool_calls; integration with the real Telegram servers; real-world DeepSeek / llama.cpp response details (check model names against the official docs); image tags and flags of llama.cpp in the optional profiles; image-reading quality on a real vision model (the self-test logic was only tested with fake models); the systemd unit; long-term (weeks) memory quality, which you need to judge from real use.
 
 ### License
 MIT

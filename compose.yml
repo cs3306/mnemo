@@ -1,13 +1,16 @@
 services:
-  companion:
+  mnemo:
     build: .
-    image: companion:latest
+    # `docker compose up -d --build` builds locally; `docker compose pull` fetches the published image instead.
+    image: ${MNEMO_IMAGE:-cs3306/mnemo:latest}
     restart: unless-stopped
     env_file: .env
     environment:
       DATA_DIR: /data
+      CONFIG_DIR: /config
     volumes:
-      - companion-data:/data      # named volume: works the same inside nested Docker
+      - mnemo-data:/data          # named volume: works the same inside nested Docker
+      - ./config:/config:ro       # your persona.md / profile.md (see README); the app never writes here
     # Telegram uses outbound long polling only. The optional HTTP API (API_ADDR=:8088) is published on
     # loopback by default; set API_BIND=0.0.0.0 only behind a reverse proxy/VPN.
     ports:
@@ -44,4 +47,4 @@ services:
       - ./models:/models:ro
 
 volumes:
-  companion-data:
+  mnemo-data:

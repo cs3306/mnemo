@@ -457,6 +457,23 @@ func (s *Store) SetSummary(chat int64, text string, upTo int64) error {
 	return s.saveState()
 }
 
+// ResetChat starts the conversation over without deleting anything: the rolling summary is cleared and both cursors move
+// to the newest message, so the recent window is empty and the old turns are neither replayed nor mined for memories.
+// Memories, the core profile and pinned style examples are untouched; messages.jsonl keeps every message.
+func (s *Store) ResetChat(chat int64) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var last int64
+	if all := s.msgs[chat]; len(all) > 0 {
+		last = all[len(all)-1].ID
+	}
+	n := len(s.afterLocked(chat, s.st.SummarizedUpTo[chat], 0))
+	delete(s.st.Summaries, chat)
+	s.st.SummarizedUpTo[chat] = last
+	s.st.ExtractedUpTo[chat] = last
+	return n, s.saveState()
+}
+
 func (s *Store) ExtractedUpTo(chat int64) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()

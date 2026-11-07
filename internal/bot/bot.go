@@ -36,6 +36,7 @@ const help = `可用命令：
 /pins  查看风格示例；/unpin <序号> 取消
 /reembed  换了嵌入模型后，重新计算记忆向量
 /consolidate  立即整理记忆（会先自动备份）
+/reset  让对话从头开始（清空摘要与近期窗口，保留记忆/档案/风格示例）
 /status  查看后端、记忆与 token 用量（含缓存命中率）
 /balance  查询 DeepSeek 账户余额
 /visiontest  检测读图模型是否真的能读图
@@ -865,6 +866,21 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 			return
 		}
 		reply(fmt.Sprintf("完成：%d 条。", done))
+	case "/reset":
+		if rest != "确认" && rest != "ok" {
+			reply("/reset 会让对话从头开始：清空滚动摘要和最近对话窗口，旧对话也不再被提取成记忆。\n" +
+				"不会动：已有记忆、核心档案、风格示例，历史消息仍保存在磁盘上。\n" +
+				"确定的话发：/reset 确认")
+			return
+		}
+		a.maintMu.Lock()
+		n, err := a.st.ResetChat(chat)
+		a.maintMu.Unlock()
+		if err != nil {
+			reply("重置失败：" + truncate(err.Error(), 200))
+			return
+		}
+		reply(fmt.Sprintf("好了，对话已重新开始（清掉了 %d 条未归档的近期消息和摘要）。记忆、核心档案和风格示例都还在。", n))
 	case "/consolidate":
 		reply("开始整理记忆（已先备份）…")
 		stats, err := a.runMaintenance(ctx, chat, true)

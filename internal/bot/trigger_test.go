@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"companion/internal/store"
 	"companion/internal/telegram"
 	"context"
 	"fmt"
@@ -125,5 +126,47 @@ func TestCommandMenuIsPublishedForAllowedUsersOnly(t *testing.T) {
 	}
 	if len(commandMenu) > 100 {
 		t.Fatal("Telegram allows at most 100 commands")
+	}
+}
+
+func TestResetClearsConversationButKeepsMemoryAndProfile(t *testing.T) {
+	app, tg, chat, st := newApp(t, "42")
+	chat.Replies = []string{"好的"}
+	app.Handle(context.Background(), msg(42, "我是北京时间"))
+	app.Wait() // the scripted maintenance pass runs in the background after the turn
+	app.Handle(context.Background(), msg(42, "/profile set 在温哥华"))
+	if _, err := st.AddMemory(store.Memory{Text: "用户周五交作业", Kind: "fact", Importance: 3, Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSummary(42, "旧摘要：用户在 UTC+8", 1); err != nil {
+		t.Fatal(err)
+	}
+	app.Handle(context.Background(), msg(42, "/reset"))
+	if !strings.Contains(tg.last(), "/reset 确认") || st.Summary(42) == "" {
+		t.Fatalf("a bare /reset must only explain: %q", tg.last())
+	}
+	app.Handle(context.Background(), msg(42, "/reset 确认"))
+	if st.Summary(42) != "" || len(st.Unsummarized(42)) != 0 {
+		t.Fatalf("summary=%q unsummarized=%d", st.Summary(42), len(st.Unsummarized(42)))
+	}
+	last := st.MessagesAfter(42, 0, 0)
+	if st.ExtractedUpTo(42) != last[len(last)-1].ID || len(last) < 2 {
+		t.Fatal("old turns must not be mined for memories, and must stay on disk")
+	}
+	found := false
+	for _, m := range st.ActiveMemories() {
+		found = found || m.Text == "用户周五交作业"
+	}
+	if !found || !strings.Contains(st.Core(), "温哥华") {
+		t.Fatal("memories and the core profile must survive a reset")
+	}
+	chat.Calls = nil
+	app.Handle(context.Background(), msg(42, "你好"))
+	var prompt string
+	for _, m := range chat.Calls[len(chat.Calls)-1] {
+		prompt += fmt.Sprint(m.Content) + "\n"
+	}
+	if strings.Contains(prompt, "我是北京时间") || strings.Contains(prompt, "旧摘要") {
+		t.Fatalf("old conversation leaked into the next prompt:\n%s", prompt)
 	}
 }

@@ -1,6 +1,6 @@
 // Package prompt assembles the model input. The layout is chosen for prefix-cache friendliness:
 //
-//	system  = persona (static) + core profile (rarely changes) + style anchors + rolling summary
+//	system  = persona (static) + style notes (changes at most daily) + core profile (rarely changes) + style anchors + rolling summary
 //	history = recent un-summarised messages, stored verbatim (stable prefix between turns)
 //	last    = [retrieved memories][learning progress][time] + the user's new message (varies per turn)
 package prompt
@@ -19,6 +19,7 @@ const DefaultPersona = "你是用户的 AI 伴侣和学习助手。语气温柔�
 
 type Input struct {
 	Persona      string
+	Style        string // learned speaking-style notes (style.json), placed right after the persona
 	Core         string
 	Summary      string
 	Pins         []string
@@ -63,6 +64,9 @@ func Build(in Input) []llm.Message {
 	}
 	var sys strings.Builder
 	sys.WriteString(persona)
+	if st := strings.TrimSpace(in.Style); st != "" {
+		sys.WriteString("\n\n## 说话风格笔记（从和他的相处里总结出来的；和上面的人设冲突时，以人设为准）\n" + st)
+	}
 	if in.Core != "" {
 		sys.WriteString("\n\n## 关于用户的核心档案\n" + in.Core)
 	}

@@ -23,6 +23,7 @@ import (
 	"companion/internal/memory"
 	"companion/internal/prompt"
 	"companion/internal/store"
+	"companion/internal/style"
 	"companion/internal/telegram"
 )
 
@@ -37,6 +38,7 @@ const help = `可用命令：
 /reembed  换了嵌入模型后，重新计算记忆向量
 /consolidate  立即整理记忆（会先自动备份）
 /reset  让对话从头开始（清空摘要与近期窗口，保留记忆/档案/风格示例）
+/style  风格笔记与复盘：/style review 立即复盘；approve / reject 审批提案；rollback 回滚；bad <原因> 标记刚才那句说得不好
 /status  查看后端、记忆与 token 用量（含缓存命中率）
 /balance  查询 DeepSeek 账户余额
 /visiontest  检测读图模型是否真的能读图
@@ -58,6 +60,7 @@ var commandMenu = []telegram.BotCommand{
 	{Command: "learning", Description: "查看学习进度"},
 	{Command: "pin", Description: "把我刚才的回复固定为说话风格示例"},
 	{Command: "pins", Description: "查看风格示例"},
+	{Command: "style", Description: "风格笔记、复盘与审批"},
 	{Command: "status", Description: "后端、记忆与 token 用量"},
 	{Command: "balance", Description: "DeepSeek 账户余额"},
 	{Command: "plugins", Description: "查看插件工具"},
@@ -94,6 +97,7 @@ type Deps struct {
 	Chat   llm.Completer
 	Maint  llm.Completer
 	Vision llm.Completer // nil disables image reading
+	Review llm.Completer // style review; nil uses Maint
 	Embed  llm.Embedder
 	TG     Messenger
 	Now    func() time.Time
@@ -104,6 +108,9 @@ type App struct {
 	st            *store.Store
 	chat          llm.Completer
 	vision        llm.Completer
+	review        llm.Completer
+	style         *style.Store
+	reviewing     atomic.Bool
 	emb           llm.Embedder
 	mm            *memory.Manager
 	tg            Messenger
@@ -142,9 +149,18 @@ func New(cfg *config.Config, d Deps) (*App, error) {
 		tr:           &tracker{st: d.Store},
 		httpc:        &http.Client{},
 	}
+	a.review = d.Review
+	if a.review == nil {
+		a.review = d.Maint
+	}
+	sty, err := style.Open(filepath.Join(cfg.DataDir, "style.json"), d.Now)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open style notes: %w", err)
+	}
+	a.style = sty
 	a.plug = newPluginSet(cfg.PluginURLs)
 	a.fetchc = newFetchClient(cfg.FetchAllowPrivate, a.checkFetchHost)
-	for kind, c := range map[string]llm.Completer{"chat": d.Chat, "maint": d.Maint, "vision": d.Vision} {
+	for kind, c := range map[string]llm.Completer{"chat": d.Chat, "maint": d.Maint, "vision": d.Vision, "review": d.Review} {
 		if cl, ok := c.(*llm.Client); ok && cl != nil {
 			cl.OnUsage = a.tr.hook(kind)
 		}
@@ -539,7 +555,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 	// Budget 1.5x: the window is trimmed in batches by RollSummary (at 1.25x, down to 0.6x) instead of by one
 	// message per turn, which would change the prompt prefix every turn and defeat the provider's prefix cache.
 	msgs := prompt.Build(prompt.Input{
-		Persona: persona, Core: a.st.Core(), Summary: a.st.Summary(chat), Pins: a.st.Pins(),
+		Persona: persona, Style: a.style.Text(), Core: a.st.Core(), Summary: a.st.Summary(chat), Pins: a.st.Pins(),
 		Recent: recent, RecentBudget: a.cfg.RecentTokens * 3 / 2, Memories: mems, Learning: a.st.ListLearning(8),
 		Now: a.now().In(a.cfg.Loc), UserText: composed,
 	})
@@ -670,6 +686,7 @@ func (a *App) maintenanceLoop(ctx context.Context) {
 		case <-t.C:
 			a.heartbeat()
 			a.MaintenanceTick(ctx)
+			a.MaybeReview(ctx)
 		}
 	}
 }
@@ -881,6 +898,8 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 			return
 		}
 		reply(fmt.Sprintf("好了，对话已重新开始（清掉了 %d 条未归档的近期消息和摘要）。记忆、核心档案和风格示例都还在。", n))
+	case "/style":
+		a.styleCommand(ctx, chat, rest, reply)
 	case "/consolidate":
 		reply("开始整理记忆（已先备份）…")
 		stats, err := a.runMaintenance(ctx, chat, true)
@@ -900,11 +919,14 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 		if a.vision != nil {
 			vision = "开"
 		}
-		out := fmt.Sprintf("对话模型：%s\n整理模型：%s\n读图：%s\n联网搜索：%s\n嵌入模型：%s\n记忆：有效 %d / 已取代 %d / 归档 %d（待重新嵌入 %d）\n风格示例：%d 条\n上次整理：%s",
-			a.cfg.LLM.Model, a.cfg.Maint.Model, vision, map[bool]string{true: "开", false: "关"}[a.cfg.SearchEnabled],
+		out := fmt.Sprintf("对话模型：%s\n整理模型：%s\n复盘模型：%s\n读图：%s\n联网搜索：%s\n嵌入模型：%s\n记忆：有效 %d / 已取代 %d / 归档 %d（待重新嵌入 %d）\n风格示例：%d 条\n上次整理：%s",
+			a.cfg.LLM.Model, a.cfg.Maint.Model, a.cfg.Review.Model, vision, map[bool]string{true: "开", false: "关"}[a.cfg.SearchEnabled],
 			a.emb.Model(), c["active"], c["superseded"], c["archived"],
 			a.mm.NeedReembed(), len(a.st.Pins()), last)
-		for _, k := range [][2]string{{"chat", "对话"}, {"maint", "后台整理"}, {"vision", "读图"}} {
+		if v := a.style.Active(); v.N > 0 {
+			out += fmt.Sprintf("\n风格笔记：v%d（%d 字）", v.N, len([]rune(v.Text)))
+		}
+		for _, k := range [][2]string{{"chat", "对话"}, {"maint", "后台整理"}, {"vision", "读图"}, {"review", "风格复盘"}} {
 			if l := a.describeUsage(k[0], k[1]); l != "" {
 				out += "\n累计 " + l
 			}

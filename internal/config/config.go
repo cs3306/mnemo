@@ -33,6 +33,7 @@ type Config struct {
 	Vision      *Endpoint // nil when image reading is disabled
 	VisionProbe bool      // check at startup that the vision model really reads images
 	Embed       Endpoint
+	Review      Endpoint // style review (REVIEW_*); falls back to MAINT_*
 
 	Temperature      float64
 	RecentTokens     int
@@ -45,6 +46,12 @@ type Config struct {
 	CoreMaxChars     int
 	MaxPins          int
 	AutoReembed      bool
+
+	ReviewHours       int  // REVIEW_HOURS: minimum hours between automatic reviews; 0 disables them
+	ReviewMinMessages int  // REVIEW_MIN_MESSAGES: new messages needed before an automatic review
+	ReviewMaxChars    int  // REVIEW_MAX_CHARS: conversation text sent to the reviewer (newest kept)
+	ReviewAutoApply   bool // REVIEW_AUTO_APPLY: apply proposals without /style approve
+	StyleMaxChars     int  // STYLE_MAX_CHARS: hard cap on the style notes
 
 	APIAddr  string // e.g. ":8088"; empty disables the HTTP API
 	APIKey   string
@@ -182,6 +189,15 @@ func Load(getenv func(string) string) (*Config, error) {
 		c.VisionProbe = e.boolean("VISION_PROBE", true)
 	}
 	c.Embed = e.endpoint("EMBED", nil)
+	c.Review = e.endpoint("REVIEW", &c.Maint)
+	if _, ok := c.Review.ExtraBody["max_tokens"]; !ok {
+		// some OpenAI-compatible providers (e.g. Claude's compatibility layer) want an explicit limit
+		eb := map[string]any{"max_tokens": 8000}
+		for k, v := range c.Review.ExtraBody {
+			eb[k] = v
+		}
+		c.Review.ExtraBody = eb
+	}
 
 	c.Temperature = e.float("TEMPERATURE", 0.8)
 	c.RecentTokens = e.integer("RECENT_TOKENS", 3000)
@@ -194,6 +210,11 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.CoreMaxChars = e.integer("CORE_MAX_CHARS", 600)
 	c.MaxPins = e.integer("MAX_PINS", 5)
 	c.AutoReembed = e.boolean("AUTO_REEMBED", true)
+	c.ReviewHours = e.integer("REVIEW_HOURS", 24)
+	c.ReviewMinMessages = e.integer("REVIEW_MIN_MESSAGES", 20)
+	c.ReviewMaxChars = e.integer("REVIEW_MAX_CHARS", 30000)
+	c.ReviewAutoApply = e.boolean("REVIEW_AUTO_APPLY", false)
+	c.StyleMaxChars = e.integer("STYLE_MAX_CHARS", 800)
 	c.APIAddr = e.str("API_ADDR", "")
 	c.APIKey = e.str("API_KEY", "")
 	c.APIModel = e.str("API_MODEL_NAME", "companion")

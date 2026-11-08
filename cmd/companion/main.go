@@ -100,10 +100,11 @@ func run() int {
 
 	chat := llm.New(cfg.LLM)
 	deps := bot.Deps{
-		Store: st,
-		Chat:  chat,
-		Maint: llm.New(cfg.Maint),
-		Embed: llm.New(cfg.Embed),
+		Store:  st,
+		Chat:   chat,
+		Maint:  llm.New(cfg.Maint),
+		Review: llm.New(cfg.Review),
+		Embed:  llm.New(cfg.Embed),
 	}
 	if cfg.TelegramToken != "" { // keep deps.TG a true nil interface otherwise (API-only mode)
 		deps.TG = telegram.New(cfg.TelegramToken, cfg.TGAPIBase)

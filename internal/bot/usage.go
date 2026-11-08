@@ -61,7 +61,9 @@ func (a *App) describeUsage(kind, label string) string {
 		s += fmt.Sprintf("（含思考 %d）", u.Reasoning)
 	}
 	c := a.cfg
-	if c.PriceHit > 0 || c.PriceMiss > 0 || c.PriceOut > 0 {
+	// PRICE_* describe the chat provider; a reviewer on another provider gets no cost estimate.
+	priced := kind != "review" || c.Review.BaseURL == c.LLM.BaseURL
+	if priced && (c.PriceHit > 0 || c.PriceMiss > 0 || c.PriceOut > 0) {
 		cost := (float64(u.Hit)*c.PriceHit + float64(u.Miss)*c.PriceMiss + float64(u.Out)*c.PriceOut) / 1e6
 		s += fmt.Sprintf("，约 %.2f %s", cost, c.PriceCurrency)
 	}

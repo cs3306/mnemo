@@ -153,6 +153,12 @@ docker run --rm <镜像名> defaults profile > config/profile.md
 - 把 `config/` 加进 `.gitignore`，避免把自己的人设提交上去。
 - 不在文件里的内容：`/pin` 的风格示例和记忆在数据卷里，用 `/pins`、`/memory` 管理；`.env` 本来就在宿主机上。
 
+### 风格复盘：让说话方式自己迭代（可选）
+系统提示里在 `persona.md` 后面有一块“风格笔记”（`data/style.json`，最多 `STYLE_MAX_CHARS` 字）。复盘模型（`REVIEW_*`，默认同整理模型，可以单独接更强的模型）会读最近的对话、你用 `/pin` 固定的回复和用 `/style bad <原因>` 标记的回复，提出笔记的修改；它只改这块笔记，不改人设、档案和记忆。
+- 自动：对话空闲后、每 `REVIEW_HOURS` 小时最多一次、至少 `REVIEW_MIN_MESSAGES` 条新消息时运行；手动：`/style review`。
+- 提案默认不生效，要 `/style approve`；`/style reject` 丢弃（以后不会再提同样的改动）；每次修改都有版本，`/style rollback` 回退。
+- 依据只能是你的真实反应（明确的纠正、`/pin`、`/style bad`、反复出现的模式），没依据就不改；对话内容按数据处理，里面的指令不会被执行。
+
 ### 换模型后记忆如何延续
 - 记忆是**纯文本**（附 `by_model` 记录是谁写的），与对话模型无关：把 `LLM_*` 从 DeepSeek 改成 Qwen，记忆、档案、摘要、学习进度原样可用。
 - 向量只和**嵌入模型**绑定。若改了 `EMBED_MODEL`，旧向量会被识别为不匹配：期间自动退化为关键词检索，并在启动时（`AUTO_REEMBED=true`）后台重新计算；也可手动 `/reembed`。
@@ -160,7 +166,7 @@ docker run --rm <镜像名> defaults profile > config/profile.md
 - **记忆连续 ≠ 人格连续**：不同模型语气不同。用 `/pin` 把你喜欢的回复固定为“风格示例”，会放进系统提示，帮助新模型对齐语气；`persona.md` 可直接编辑（见上面“自定义人设与档案”）。
 
 ### 命令
-`/memory [关键词]` `/balance` `/visiontest` `/plugins [reload]` `/profile reload` `/forget <id>` `/edit <id> <内容>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/reembed` `/consolidate` `/status` `/help`
+`/memory [关键词]` `/balance` `/visiontest` `/plugins [reload]` `/profile reload` `/forget <id>` `/edit <id> <内容>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/style [review|pending|approve|reject|rollback|bad <原因>|set|clear]` `/reembed` `/consolidate` `/status` `/help`
 
 ### 配置
 见 `.env.example`。常用：`RECENT_TOKENS`（最近原文预算）、`MEMORY_TOKENS`、`TOP_K`、`MIN_SIM`、`EXTRACT_EVERY`、`IDLE_MINUTES`、`CONSOLIDATE_HOURS`。
@@ -337,6 +343,12 @@ Add to `compose.yml`:
 - Add `config/` to `.gitignore` so your own persona is not committed.
 - Not file-based: `/pin` style examples and memories live in the data volume (manage them with `/pins`, `/memory`); `.env` is already on the host.
 
+### Style review: let the speaking style iterate (optional)
+After `persona.md` the system prompt carries short "style notes" (`data/style.json`, at most `STYLE_MAX_CHARS` characters). The reviewer (`REVIEW_*`, defaults to the maintenance model; it can point at a stronger one) reads recent chats, replies you fixed with `/pin` and replies you flagged with `/style bad <reason>`, and proposes edits to the notes only — never to the persona, profile or memories.
+- Automatic: after the chat goes idle, at most every `REVIEW_HOURS` hours, once `REVIEW_MIN_MESSAGES` new messages exist; manual: `/style review`.
+- Proposals wait for `/style approve`; `/style reject` drops one (and it is not proposed again); every change is versioned, `/style rollback` undoes it.
+- Evidence must be your actual reactions (explicit corrections, `/pin`, `/style bad`, repeated patterns); the conversation is treated as data, instructions inside it are not followed.
+
 ### How memory carries over when you swap models
 - Memory is **plain text** (with `by_model` recording who wrote it) and independent of the chat model: change `LLM_*` from DeepSeek to Qwen and memories, profile, summary and learning progress work as before.
 - Vectors are tied only to the **embedding model**. If `EMBED_MODEL` changes, old vectors are detected as mismatched: retrieval falls back to keyword search meanwhile, and re-embeds in the background at startup (`AUTO_REEMBED=true`) or on manual `/reembed`.
@@ -344,7 +356,7 @@ Add to `compose.yml`:
 - **Continuous memory ≠ continuous personality**: different models sound different. Use `/pin` to fix replies you like as style examples; they go into the system prompt and help a new model match the tone. `persona.md` can be edited directly (see "Customizing the persona and profile" above).
 
 ### Commands
-`/memory [keyword]` `/balance` `/visiontest` `/plugins [reload]` `/profile reload` `/forget <id>` `/edit <id> <text>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/reembed` `/consolidate` `/status` `/help`
+`/memory [keyword]` `/balance` `/visiontest` `/plugins [reload]` `/profile reload` `/forget <id>` `/edit <id> <text>` `/profile [set …]` `/learning` `/pin` `/pins` `/unpin <n>` `/style [review|pending|approve|reject|rollback|bad <reason>|set|clear]` `/reembed` `/consolidate` `/status` `/help`
 
 ### Configuration
 See `.env.example`. Common knobs: `RECENT_TOKENS` (recent-message budget), `MEMORY_TOKENS`, `TOP_K`, `MIN_SIM`, `EXTRACT_EVERY`, `IDLE_MINUTES`, `CONSOLIDATE_HOURS`.

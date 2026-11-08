@@ -111,6 +111,8 @@ PLUGIN_TIMEOUT=180                         # 单次工具调用的秒数
 
 启动时 mnemo 向每个服务 `GET /v1/tools` 获取工具清单并交给模型；模型调用时转发为 `POST /v1/tools/{name}`。工具返回的文件在 Telegram 里作为文档/图片发送；通过 OpenAI 兼容 API 访问时没有文件通道，文件会被丢弃，并告知模型。服务暂时连不上不影响对话，之后每分钟重试一次；`/plugins` 查看状态，`/plugins reload` 立即重新发现。协议（几十行就能实现）与官方插件服务见 [mnemo-plugin](https://github.com/cs3306/mnemo-plugin)。工具名不能与内置的 `web_search` / `web_fetch` 重名。
 
+**收文件**：你在 Telegram 里发来的非图片文件（压缩包、源码、PDF 等，最大 20 MB）会被下载并转发给插件（`POST {base}/v1/files`，返回 404 表示该服务不收文件，就问下一个）。mnemo-plugin 在启用 `dev_exec` 时会把文件存进开发容器的 `inbox/`，mnemo 立刻回一条 `📥 已保存…` 作为回执，并把保存路径连同你的说明（caption）交给模型，它就能用 `dev_exec` 解压、整理、运行。图片仍然走读图，不受影响。
+
 **定时触发**：开启 API（`API_ADDR` + `API_KEY`）后，`POST /v1/trigger`（`{"prompt":"…","label":"晨报"}`，Bearer 鉴权）会立刻返回 202，并在 Telegram 对话里以“定时任务”的方式跑一轮（带人设、记忆、搜索与插件工具），结果发给你。这一轮的指令不会被存成你说过的话，只保存回复。mnemo-plugin 的 `schedule_*` 工具就是用它实现“对 bot 说一句话就能设每天的晨报”的。不要把该端口暴露到公网。
 
 ### 用量与费用
@@ -300,6 +302,8 @@ PLUGIN_TIMEOUT=180                         # seconds per tool call
 ```
 
 At startup mnemo calls `GET /v1/tools` on each server and offers those tools to the model; a call is forwarded as `POST /v1/tools/{name}`. Files a tool returns are sent as documents/photos on Telegram; over the OpenAI-compatible API there is no file channel, so they are dropped and the model is told. A server that is down does not stop the conversation and is retried once a minute; `/plugins` shows the status, `/plugins reload` re-discovers immediately. The protocol (a few dozen lines to implement) and the reference plugin server live in [mnemo-plugin](https://github.com/cs3306/mnemo-plugin). Tool names must not collide with the built-in `web_search` / `web_fetch`.
+
+**Receiving files**: a non-image file you send on Telegram (archive, source, PDF, … up to 20 MB) is downloaded and forwarded to the plugins (`POST {base}/v1/files`; 404 means that server does not take files, so the next one is asked). With `dev_exec` enabled, mnemo-plugin stores it in the dev container's `inbox/`; mnemo answers at once with a `📥 saved …` receipt and gives the model the stored path together with your caption, so it can unpack, organise and run it with `dev_exec`. Images still go to vision as before.
 
 **Scheduled triggers**: with the API enabled (`API_ADDR` + `API_KEY`), `POST /v1/trigger` (`{"prompt":"…","label":"Morning brief"}`, bearer auth) returns 202 at once and runs one turn in the Telegram conversation as a "scheduled task" (persona, memory, search and plugin tools all available) and sends you the result. The instruction is not stored as something you said; only the reply is. mnemo-plugin's `schedule_*` tools use this so you can tell the bot "brief me every day at 7:30". Do not expose that port to the internet.
 

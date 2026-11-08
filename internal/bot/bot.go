@@ -372,10 +372,13 @@ func (a *App) Handle(ctx context.Context, u telegram.Update) {
 		text = strings.TrimSpace(m.Caption)
 	}
 	fileID, mime := "", "image/jpeg"
+	var doc *telegram.Document // a non-image file: stored by a plugin, not shown to the model
 	if len(m.Photo) > 0 {
 		fileID = m.Photo[len(m.Photo)-1].FileID
 	} else if m.Document != nil && strings.HasPrefix(m.Document.MimeType, "image/") {
 		fileID, mime = m.Document.FileID, m.Document.MimeType
+	} else if m.Document != nil {
+		doc = m.Document
 	}
 
 	l := a.chatLock(chat)
@@ -384,9 +387,15 @@ func (a *App) Handle(ctx context.Context, u telegram.Update) {
 	a.touch(chat)
 	defer a.touch(chat)
 	switch {
-	case strings.HasPrefix(text, "/") && fileID == "":
+	case strings.HasPrefix(text, "/") && fileID == "" && doc == nil:
 		a.command(ctx, chat, text)
-	case text != "" || fileID != "":
+	case text != "" || fileID != "" || doc != nil:
+		if doc != nil {
+			var ok bool
+			if text, ok = a.receiveDoc(ctx, chat, doc, text); !ok {
+				return
+			}
+		}
 		a.turn(ctx, chat, text, fileID, mime)
 	}
 }

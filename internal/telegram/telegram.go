@@ -46,7 +46,9 @@ type PhotoSize struct {
 
 type Document struct {
 	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
 	MimeType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
 }
 
 type Client struct {
@@ -183,7 +185,7 @@ func (c *Client) Typing(ctx context.Context, chat int64) {
 }
 
 func (c *Client) Download(ctx context.Context, fileID string) ([]byte, error) {
-	const maxBytes = 15_000_000
+	const maxBytes = 20_000_000 // the Bot API's own download limit
 	var info struct {
 		FilePath string `json:"file_path"`
 		FileSize int64  `json:"file_size"`

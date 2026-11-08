@@ -67,6 +67,7 @@ type Config struct {
 	PluginToken       string        // PLUGIN_TOKEN: bearer token sent to every plugin server
 	PluginTimeout     time.Duration // PLUGIN_TIMEOUT seconds per tool call
 	MaxToolRounds     int
+	ToolGraceRounds   int // TOOL_GRACE_ROUNDS: the last rounds of a turn, announced to the model so it can wrap up
 
 	PriceHit, PriceMiss, PriceOut float64 // per million tokens, optional (for the /status cost estimate)
 	PriceCurrency                 string
@@ -232,6 +233,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.PluginToken = e.str("PLUGIN_TOKEN", "")
 	c.PluginTimeout = time.Duration(e.float("PLUGIN_TIMEOUT", 180) * float64(time.Second))
 	c.MaxToolRounds = e.integer("MAX_TOOL_ROUNDS", 4)
+	c.ToolGraceRounds = e.integer("TOOL_GRACE_ROUNDS", 3)
 	c.PriceHit = e.float("PRICE_CACHE_HIT", 0)
 	c.PriceMiss = e.float("PRICE_CACHE_MISS", 0)
 	c.PriceOut = e.float("PRICE_OUTPUT", 0)

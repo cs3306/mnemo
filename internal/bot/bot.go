@@ -508,7 +508,16 @@ func countRounds(tail []llm.Message) int {
 	return n
 }
 
-const finishNow = "工具调用次数已达上限，请不要再调用任何工具，直接根据已有信息回答。"
+// finishNow is sent when the cap is reached: no tools are offered, so the model can only report. The report is stored like any
+// reply, so it is what the next turn ("继续") starts from; tool results themselves are not carried over.
+const finishNow = "本轮工具调用次数已用完，现在不能再调用任何工具。请直接汇报：已经完成了什么（含关键文件路径或结果）、目前卡在哪或做到哪一步、" +
+	"下一步打算做什么。不要假装已经做完。用户回复“继续”后，你会在新的一轮里接着做。"
+
+// graceNotice is sent once when the turn enters its last few rounds, so the model can wrap up instead of being cut off.
+func graceNotice(left int) string {
+	return fmt.Sprintf("提示：本轮最多还能再调用 %d 次工具。请把剩下的步骤合并成尽量少的调用；如果做不完，就在最后留出一次回复，"+
+		"汇报已完成的部分、当前状态和下一步，用户说“继续”后再接着做。", left)
+}
 
 // RespondTools is Respond with tool calling. When opts.Tail is non-empty and the chat's last stored message is
 // still the user message of this turn, the turn continues (the user message is not stored again).
@@ -588,13 +597,16 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 	}
 	rounds := countRounds(opts.Tail)
 	var res llm.Result
-	nudged := false
+	nudged, warned := false, false
 	for {
 		limited := rounds >= a.cfg.MaxToolRounds
 		if limited {
 			msgs = append(msgs, llm.Text("system", finishNow))
+		} else if g := min(a.cfg.ToolGraceRounds, a.cfg.MaxToolRounds/2); len(tools) > 0 && !warned && g > 0 && rounds >= a.cfg.MaxToolRounds-g {
+			warned = true // once per turn, so the prompt prefix stays stable afterwards
+			msgs = append(msgs, llm.Text("system", graceNotice(a.cfg.MaxToolRounds-rounds)))
 		}
-		if len(tools) > 0 {
+		if len(tools) > 0 && !limited { // at the cap no tools are offered, so the model can only answer
 			res, err = tc.CompleteTools(ctx, msgs, tools, a.cfg.Temperature)
 		} else {
 			res.Text, err = a.chat.Complete(ctx, msgs, a.cfg.Temperature)

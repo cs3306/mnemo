@@ -79,7 +79,7 @@ WantedBy=multi-user.target
 `companion` 模型支持 OpenAI `tools`：前端在请求里声明自己的工具（如 `capture_screen`、`fetch_image`），模型需要时返回 `finish_reason: "tool_calls"`；前端执行后，把 `assistant(tool_calls)` 和 `tool` 结果消息接在同一条用户消息后面再发一次，服务端继续这一轮。
 - 工具结果里的图片：放进 `tool` 消息的 `content`（`image_url` 的 base64 `data:` URL 数组，或直接给 `data:image/...` 字符串），服务端用读图模型转写成文字再交给对话模型。
 - 这一轮的工具往返**不写入长期历史**，只存用户原话和最终回复。
-- 每轮工具调用上限 `MAX_TOOL_ROUNDS`（默认 4），到限后强制模型直接作答。
+- 每轮工具调用上限 `MAX_TOOL_ROUNDS`（默认 4）。最后 `TOOL_GRACE_ROUNDS`（默认 3，最多取上限的一半）轮开始时会告诉模型“还剩几次”，让它合并步骤、留出收尾；到限后不再提供工具，模型只能汇报已完成的、当前状态和下一步，这条汇报会像普通回复一样存下来，你回复“继续”就从它接着做（工具结果本身不会带到下一轮）。
 - 对话模型需支持函数调用；DeepSeek 开启思考时，带 tools 的请求必须回传 `reasoning_content`（服务端会原样转发/返回，前端需照做）。**建议聊天保持关闭思考。**
 - 限制：若同一次回复里混合了服务端内置工具和前端工具，会整体交给前端，模型之前的内置工具结果不会出现在下一次请求里。
 
@@ -271,7 +271,7 @@ Set `API_ADDR=:8088` and `API_KEY=<long random string>` and the service also exp
 The `companion` model supports OpenAI `tools`: the frontend declares its own tools (e.g. `capture_screen`, `fetch_image`) in the request. When the model needs one it returns `finish_reason: "tool_calls"`; the frontend runs it and sends the request again with the `assistant(tool_calls)` message and the `tool` result message appended after the same user message, and the server continues that turn.
 - Images in tool results: put them in the `tool` message `content` (an array of base64 `data:` `image_url` parts, or a plain `data:image/...` string). The server transcribes them to text with the vision model before handing them to the chat model.
 - The tool round trip of a turn is **not written to long-term history**; only the user's own words and the final reply are stored.
-- Tool calls per turn are capped by `MAX_TOOL_ROUNDS` (default 4); at the cap the model is forced to answer directly.
+- Tool calls per turn are capped by `MAX_TOOL_ROUNDS` (default 4). For the last `TOOL_GRACE_ROUNDS` (default 3, at most half the cap) rounds the model is told how many calls it has left so it can batch steps and leave room to wrap up; at the cap no tools are offered and it can only report what is done, the current state and the next step. That report is stored like any reply, so "continue" picks up from it (tool results themselves are not carried over).
 - The chat model must support function calling. With DeepSeek thinking enabled, requests with tools must echo `reasoning_content` back (the server forwards it as-is and the frontend must do the same). **Keeping thinking off for chat is recommended.**
 - Limitation: if one reply mixes built-in server tools and frontend tools, the whole call is handed to the frontend, and the model's earlier built-in tool results will not appear in the next request.
 

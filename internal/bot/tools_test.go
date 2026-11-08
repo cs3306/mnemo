@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -208,5 +209,41 @@ func TestPromptPrefixIsStableAcrossTurns(t *testing.T) {
 				t.Fatalf("turn %d: prompt prefix changed at message %d", n+1, i)
 			}
 		}
+	}
+}
+
+// A turn that runs into the cap gets a heads-up, then one tools-free reply to report progress; that reply is stored,
+// so the next turn can pick up from it.
+func TestGraceNoticeThenTheCapForcesAProgressReport(t *testing.T) {
+	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"results":[]}`)) }))
+	defer search.Close()
+	call := `[{"id":"s1","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"x\"}"}}]`
+	script := make([]llm.Result, 6)
+	for i := range script {
+		script[i] = llm.Result{ToolCalls: json.RawMessage(call)}
+	}
+	script = append(script, llm.Result{Text: "做到第三步，下一步是合并。"})
+	chat := &testutil.ToolChat{Script: script}
+	_, srv, _ := newToolApp(t, chat, nil, func(c *config.Config) {
+		c.SearchEnabled, c.SearchBase, c.MaxToolRounds, c.ToolGraceRounds = true, search.URL, 6, 3
+	})
+	resp := post(t, srv, "secret", `{"messages":[{"role":"user","content":"x"}]}`)
+	if resp.StatusCode != 200 || len(chat.Calls) != 7 {
+		t.Fatalf("status %d, backend calls %d (want 200 after 6 tool rounds + 1 report)", resp.StatusCode, len(chat.Calls))
+	}
+	lastOf := func(i int) llm.Message { m := chat.Calls[i]; return m[len(m)-1] }
+	if strings.Contains(fmt.Sprint(lastOf(2).Content), "最多还能再调用") {
+		t.Fatal("no notice before the last 3 rounds")
+	}
+	if n := fmt.Sprint(lastOf(3).Content); lastOf(3).Role != "system" || !strings.Contains(n, "最多还能再调用 3 次") {
+		t.Fatalf("round 4 should carry the notice, got %q", n)
+	}
+	for i := 4; i < 6; i++ {
+		if strings.Contains(fmt.Sprint(lastOf(i).Content), "最多还能再调用") {
+			t.Fatalf("notice repeated at call %d", i)
+		}
+	}
+	if len(chat.ToolsSeen[6]) != 0 || !strings.Contains(fmt.Sprint(lastOf(6).Content), "汇报") {
+		t.Fatal("the final call must offer no tools and ask for a progress report")
 	}
 }

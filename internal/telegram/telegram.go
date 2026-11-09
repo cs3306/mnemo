@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"companion/internal/textutil"
@@ -55,7 +56,18 @@ type Client struct {
 	apiBase string
 	token   string
 	hc      *http.Client
+	richOff atomic.Bool // set once the server answers 404 for sendRichMessage (older/self-hosted Bot API)
 }
+
+// APIError is an answer from the Bot API server itself (as opposed to a network failure): the request was
+// seen and rejected, so it is safe to retry the same content another way.
+type APIError struct {
+	Method string
+	Code   int
+	Desc   string
+}
+
+func (e *APIError) Error() string { return fmt.Sprintf("telegram %s: %s", e.Method, e.Desc) }
 
 func New(token, apiBase string) *Client {
 	return &Client{apiBase: apiBase, token: token, hc: &http.Client{Timeout: 90 * time.Second}}
@@ -93,12 +105,13 @@ func (c *Client) call(ctx context.Context, method string, params, out any) error
 		OK          bool            `json:"ok"`
 		Result      json.RawMessage `json:"result"`
 		Description string          `json:"description"`
+		ErrorCode   int             `json:"error_code"`
 	}
 	if err := json.Unmarshal(b, &env); err != nil {
-		return fmt.Errorf("telegram %s: non-JSON response (HTTP %d)", method, resp.StatusCode)
+		return &APIError{Method: method, Code: resp.StatusCode, Desc: fmt.Sprintf("non-JSON response (HTTP %d)", resp.StatusCode)}
 	}
 	if !env.OK {
-		return fmt.Errorf("telegram %s: %s", method, env.Description)
+		return &APIError{Method: method, Code: env.ErrorCode, Desc: env.Description}
 	}
 	if out != nil {
 		return json.Unmarshal(env.Result, out)
@@ -117,6 +130,35 @@ func (c *Client) Updates(ctx context.Context, offset int64, timeoutSec int) ([]U
 // Send posts plain text (model output contains LaTeX / underscores that break Markdown parse modes).
 func (c *Client) Send(ctx context.Context, chat int64, text string) error {
 	for _, part := range textutil.SplitMessage(text, 3500) {
+		if err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": part}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendRich posts model output as a rich message (Bot API 10.1+): headings, lists, tables and LaTeX formulas
+// render natively. Each chunk is sent with sendRichMessage; if the server rejects it (bad markup, or a
+// server that does not know the method) that chunk is re-sent as plain text, so a reply is never lost.
+// Network errors are returned as-is without a retry, to avoid duplicating a message that may have arrived.
+func (c *Client) SendRich(ctx context.Context, chat int64, text string) error {
+	for _, part := range textutil.SplitMessage(text, 6000) {
+		if !c.richOff.Load() {
+			err := c.call(ctx, "sendRichMessage", map[string]any{
+				"chat_id":      chat,
+				"rich_message": map[string]any{"markdown": PrepareRich(part)},
+			}, nil)
+			if err == nil {
+				continue
+			}
+			var ae *APIError
+			if !errors.As(err, &ae) {
+				return err
+			}
+			if ae.Code == http.StatusNotFound {
+				c.richOff.Store(true)
+			}
+		}
 		if err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": part}, nil); err != nil {
 			return err
 		}

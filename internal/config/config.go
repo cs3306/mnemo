@@ -22,6 +22,7 @@ type Endpoint struct {
 type Config struct {
 	TelegramToken string
 	TGAPIBase     string
+	TGRich        bool // send model replies as Telegram rich messages (tables, LaTeX); TELEGRAM_RICH, default on
 	AllowedIDs    map[int64]bool
 	DataDir       string
 	ConfigDir     string // user-editable persona.md / profile.md; defaults to DataDir
@@ -159,6 +160,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	c := &Config{
 		TelegramToken: e.str("TELEGRAM_TOKEN", ""),
 		TGAPIBase:     strings.TrimRight(e.str("TELEGRAM_API_BASE", "https://api.telegram.org"), "/"),
+		TGRich:        e.boolean("TELEGRAM_RICH", true),
 		AllowedIDs:    map[int64]bool{},
 		DataDir:       e.str("DATA_DIR", "/data"),
 		TZ:            e.str("TZ", "UTC"),

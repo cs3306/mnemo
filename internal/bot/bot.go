@@ -349,6 +349,25 @@ func (a *App) send(ctx context.Context, chat int64, text string) {
 	}
 }
 
+// RichSender is implemented by the real Telegram client; test fakes may skip it.
+type RichSender interface {
+	SendRich(ctx context.Context, chat int64, text string) error
+}
+
+// sendReply delivers model-written text. With TELEGRAM_RICH on and a client that supports it, the text goes out as a
+// rich message (tables, LaTeX); anything else — status lines, errors, receipts — keeps using plain send.
+func (a *App) sendReply(ctx context.Context, chat int64, text string) {
+	if a.cfg.TGRich {
+		if rs, ok := a.tg.(RichSender); ok {
+			if err := rs.SendRich(ctx, chat, text); err != nil {
+				slog.Warn("rich send failed", "err", err)
+			}
+			return
+		}
+	}
+	a.send(ctx, chat, text)
+}
+
 // Handle processes one Telegram update.
 func (a *App) Handle(ctx context.Context, u telegram.Update) {
 	m := u.Message
@@ -434,7 +453,7 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string) {
 		a.send(ctx, chat, "出错了："+truncate(err.Error(), 200))
 		return
 	}
-	a.send(ctx, chat, r.Text)
+	a.sendReply(ctx, chat, r.Text)
 	a.deliverFiles(ctx, chat, r.Files)
 }
 

@@ -84,7 +84,7 @@ func (a *App) runScheduled(chat int64, label, prompt string) {
 	}
 	slog.Info("scheduled task finished", "label", label, "chars", len([]rune(text)), "files", len(r.Files))
 	if text != "" {
-		a.send(ctx, chat, text)
+		a.sendReply(ctx, chat, text)
 	}
 	a.deliverFiles(ctx, chat, r.Files)
 }

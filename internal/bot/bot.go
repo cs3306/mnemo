@@ -532,7 +532,7 @@ func (a *App) wantVoice(voiceIn bool) bool {
 
 // speak sends text as a voice message and reports whether it did. It never fails the turn: on any problem the
 // caller still has the text reply.
-func (a *App) speak(ctx context.Context, chat int64, text string) bool {
+func (a *App) speak(ctx context.Context, chat int64, text, voice string) bool {
 	clean := speech.CleanForSpeech(text, a.cfg.TTSMaxChars)
 	if clean == "" {
 		return false
@@ -546,7 +546,10 @@ func (a *App) speak(ctx context.Context, chat int64, text string) bool {
 	if format == "" {
 		format = "mp3"
 	}
-	audio, err := a.tts.Synthesize(ctx, clean, a.cfg.TTSVoice, format)
+	if voice == "" {
+		voice = a.cfg.TTSVoice
+	}
+	audio, err := a.tts.Synthesize(ctx, clean, voice, format)
 	if err != nil {
 		slog.Warn("speech synthesis failed", "err", err)
 		return false
@@ -599,12 +602,12 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string, v
 	voiceOut := a.wantVoice(voiceIn) && !r.VoiceSent // she already spoke on her own: do not read the text out again
 	spoke := false
 	if voiceOut && !a.cfg.TTSText {
-		spoke = a.speak(ctx, chat, r.Text) // voice only; fall back to text when speaking is not possible
+		spoke = a.speak(ctx, chat, r.Text, "") // voice only; fall back to text when speaking is not possible
 	}
 	if !spoke && r.Text != "" {
 		a.sendReply(ctx, chat, r.Text)
 		if voiceOut && a.cfg.TTSText {
-			a.speak(ctx, chat, r.Text)
+			a.speak(ctx, chat, r.Text, "")
 		}
 	}
 	a.deliverFiles(ctx, chat, r.Files)

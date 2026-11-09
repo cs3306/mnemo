@@ -40,10 +40,11 @@ type Config struct {
 	STTLanguage string    // STT_LANGUAGE, ISO code like "zh"; empty = let the server detect
 	TTS         *Endpoint // text to speech (TTS_*); nil = no voice replies
 	TTSVoice    string
-	TTSFormat   string // mp3 (default) | opus | ...: what Telegram's sendVoice accepts
-	TTSMode     string // off | auto (voice reply only to voice messages, default) | always
-	TTSMaxChars int    // longer replies are sent as text only
-	TTSText     bool   // also send the text of a voice reply (default true)
+	TTSVoices   []TTSVoice // TTS_VOICES: voices she may pick between in send_voice (empty = only TTSVoice)
+	TTSFormat   string     // mp3 (default) | opus | ...: what Telegram's sendVoice accepts
+	TTSMode     string     // off | auto (voice reply only to voice messages, default) | always
+	TTSMaxChars int        // longer replies are sent as text only
+	TTSText     bool       // also send the text of a voice reply (default true)
 
 	Temperature      float64
 	RecentTokens     int
@@ -212,6 +213,10 @@ func Load(getenv func(string) string) (*Config, error) {
 		v.Timeout = time.Duration(e.float("TTS_TIMEOUT", 120) * float64(time.Second))
 		c.TTS = &v
 		c.TTSVoice = e.str("TTS_VOICE", "")
+		c.TTSVoices = parseTTSVoices(e.str("TTS_VOICES", ""))
+		if c.TTSVoice == "" && len(c.TTSVoices) > 0 {
+			c.TTSVoice = c.TTSVoices[0].Name
+		}
 		c.TTSFormat = strings.ToLower(e.str("TTS_FORMAT", "mp3"))
 		c.TTSMode = strings.ToLower(e.str("TTS_MODE", "auto"))
 		c.TTSMaxChars = e.integer("TTS_MAX_CHARS", 500)
@@ -321,4 +326,23 @@ func (c *Config) Validate() []string {
 		}
 	}
 	return errs
+}
+
+// TTSVoice is one selectable voice: Name goes to the TTS server, Desc tells her when to use it.
+type TTSVoice struct{ Name, Desc string }
+
+// parseTTSVoices reads "name=when to use;name2=when to use" (the description is optional, ";" separates voices).
+func parseTTSVoices(raw string) []TTSVoice {
+	var out []TTSVoice
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ";") {
+		name, desc, _ := strings.Cut(part, "=")
+		name, desc = strings.TrimSpace(name), strings.TrimSpace(desc)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, TTSVoice{Name: name, Desc: desc})
+	}
+	return out
 }

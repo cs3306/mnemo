@@ -130,3 +130,18 @@ func TestVoiceConfig(t *testing.T) {
 		t.Fatalf("bad format/mode must be rejected: %v", c.Validate())
 	}
 }
+
+func TestParseTTSVoices(t *testing.T) {
+	v := parseTTSVoices(" mll = 软萌日常 ; serena=更俏皮;mll=dup;;bare ")
+	if len(v) != 3 || v[0] != (TTSVoice{"mll", "软萌日常"}) || v[1].Name != "serena" || v[2] != (TTSVoice{"bare", ""}) {
+		t.Fatalf("got %+v", v)
+	}
+	c, err := Load(mapEnv(map[string]string{"LLM_BASE_URL": "http://x/v1/", "LLM_MODEL": "m",
+		"TTS_ENABLED": "1", "TTS_BASE_URL": "http://t", "TTS_MODEL": "k", "TTS_VOICES": "a=x;b=y"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TTSVoice != "a" || len(c.TTSVoices) != 2 {
+		t.Fatalf("default voice should be the first: %+v", c)
+	}
+}

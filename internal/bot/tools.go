@@ -45,11 +45,24 @@ func (a *App) voiceToolDef() json.RawMessage {
 		"想说晚安、打招呼、撒娇、念一小段东西、读出一句想让对方听见的话，或者用户说想听你的声音时，都可以主动用。"+
 		"text 是要念出来的原文：口语、自然，不要 Markdown、表格、公式、链接或表情符号堆叠；最多约 %d 字，更长的内容请用文字回复。"+
 		"一轮里发一两条就够。语音发出后，你的文字回复不要再重复同样的内容（可以不回文字，或只补一句）。", a.cfg.TTSMaxChars)
+	props := map[string]any{"text": map[string]any{"type": "string", "description": "要念出来的话"}}
+	if len(a.cfg.TTSVoices) > 1 {
+		var names []string
+		var guide strings.Builder
+		for _, v := range a.cfg.TTSVoices {
+			names = append(names, v.Name)
+			fmt.Fprintf(&guide, "%s", v.Name)
+			if v.Desc != "" {
+				fmt.Fprintf(&guide, "（%s）", v.Desc)
+			}
+			guide.WriteString("；")
+		}
+		props["voice"] = map[string]any{"type": "string", "enum": names,
+			"description": "用哪种声音，按语境自己选：" + guide.String() + "不填就用默认的 " + a.cfg.TTSVoice}
+	}
 	def := map[string]any{"type": "function", "function": map[string]any{
 		"name": "send_voice", "description": desc,
-		"parameters": map[string]any{"type": "object",
-			"properties": map[string]any{"text": map[string]any{"type": "string", "description": "要念出来的话"}},
-			"required":   []string{"text"}},
+		"parameters": map[string]any{"type": "object", "properties": props, "required": []string{"text"}},
 	}}
 	b, _ := json.Marshal(def)
 	return b
@@ -62,7 +75,8 @@ func (a *App) runSendVoice(ctx context.Context, c toolCall, ts *turnState) strin
 		return "当前渠道不能发送语音，请用文字回复"
 	}
 	var args struct {
-		Text string `json:"text"`
+		Text  string `json:"text"`
+		Voice string `json:"voice"`
 	}
 	if err := json.Unmarshal([]byte(c.Function.Arguments), &args); err != nil {
 		return "参数不是合法的 JSON"
@@ -71,7 +85,17 @@ func (a *App) runSendVoice(ctx context.Context, c toolCall, ts *turnState) strin
 	if text == "" {
 		return "text 不能为空"
 	}
-	if !a.speak(ctx, ts.chat, text) {
+	voice := strings.TrimSpace(args.Voice)
+	if voice != "" {
+		ok := voice == a.cfg.TTSVoice
+		for _, v := range a.cfg.TTSVoices {
+			ok = ok || v.Name == voice
+		}
+		if !ok { // never forward a name the server does not know
+			voice = ""
+		}
+	}
+	if !a.speak(ctx, ts.chat, text, voice) {
 		return "语音没发出去（合成或发送失败），请改用文字回复"
 	}
 	ts.spoken = append(ts.spoken, text)

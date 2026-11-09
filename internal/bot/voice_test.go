@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"companion/internal/config"
 	"companion/internal/llm"
 	"companion/internal/telegram"
 	"companion/internal/testutil"
@@ -42,10 +43,11 @@ func (f *fakeSTT) Transcribe(_ context.Context, _ []byte, name, language string)
 type fakeTTS struct {
 	err   error
 	input string
+	voice string
 }
 
-func (f *fakeTTS) Synthesize(_ context.Context, text, _, format string) ([]byte, error) {
-	f.input = text
+func (f *fakeTTS) Synthesize(_ context.Context, text, voice, format string) ([]byte, error) {
+	f.input, f.voice = text, voice
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -233,5 +235,57 @@ func TestToolVoiceSuppressesAutoReadAloud(t *testing.T) {
 	app.Wait()
 	if len(tg.voices) != 1 {
 		t.Fatalf("exactly the tool's voice, not a second read-aloud: %v", tg.voices)
+	}
+}
+
+func sendVoiceCallAs(text, voice string) json.RawMessage {
+	args, _ := json.Marshal(map[string]string{"text": text, "voice": voice})
+	b, _ := json.Marshal([]map[string]any{{"id": "c1", "type": "function",
+		"function": map[string]any{"name": "send_voice", "arguments": string(args)}}})
+	return b
+}
+
+func TestSendVoiceLetsHerPickAVoice(t *testing.T) {
+	app, _, tts, tc := voiceToolApp(t,
+		llm.Result{ToolCalls: sendVoiceCall("先用默认的")},
+		llm.Result{Text: ""})
+	app.cfg.TTSVoice = "mll"
+	app.cfg.TTSVoices = []config.TTSVoice{{Name: "mll", Desc: "软萌日常"}, {Name: "serena", Desc: "更俏皮夸张"}}
+	app.Handle(context.Background(), msg(42, "说句话"))
+	app.Wait()
+	def := string(tc.ToolsSeen[0])
+	if !strings.Contains(def, `"enum":["mll","serena"]`) || !strings.Contains(def, "更俏皮夸张") {
+		t.Fatalf("voice choice not offered: %s", def)
+	}
+	if tts.voice != "mll" {
+		t.Fatalf("default voice not used: %q", tts.voice)
+	}
+
+	app, _, tts, _ = voiceToolApp(t, llm.Result{ToolCalls: sendVoiceCallAs("嘿嘿", "serena")}, llm.Result{Text: ""})
+	app.cfg.TTSVoice = "mll"
+	app.cfg.TTSVoices = []config.TTSVoice{{Name: "mll"}, {Name: "serena"}}
+	app.Handle(context.Background(), msg(42, "来一句"))
+	app.Wait()
+	if tts.voice != "serena" {
+		t.Fatalf("chosen voice not used: %q", tts.voice)
+	}
+
+	app, _, tts, _ = voiceToolApp(t, llm.Result{ToolCalls: sendVoiceCallAs("嘿嘿", "evil; rm")}, llm.Result{Text: ""})
+	app.cfg.TTSVoice = "mll"
+	app.cfg.TTSVoices = []config.TTSVoice{{Name: "mll"}, {Name: "serena"}}
+	app.Handle(context.Background(), msg(42, "来一句"))
+	app.Wait()
+	if tts.voice != "mll" {
+		t.Fatalf("unknown voice must fall back to the default: %q", tts.voice)
+	}
+}
+
+func TestSingleVoiceHasNoVoiceParameter(t *testing.T) {
+	app, _, _, tc := voiceToolApp(t, llm.Result{Text: "好"})
+	app.cfg.TTSVoice = "mll"
+	app.Handle(context.Background(), msg(42, "你好"))
+	app.Wait()
+	if strings.Contains(string(tc.ToolsSeen[0]), `"voice"`) {
+		t.Fatalf("one voice needs no choice: %s", tc.ToolsSeen[0])
 	}
 }

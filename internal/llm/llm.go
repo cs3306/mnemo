@@ -13,6 +13,8 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"companion/internal/config"
@@ -82,6 +84,42 @@ type Client struct {
 	EP      config.Endpoint
 	HC      *http.Client
 	OnUsage func(Usage) // optional; called after every successful chat completion
+
+	// midSystemAsUser is set once the server rejected a system message that is not first (strict chat templates such
+	// as Qwen3's raise "System message must be at the beginning"); from then on later system messages are sent as user.
+	midSystemAsUser atomic.Bool
+}
+
+// systemNotePrefix marks a mid-conversation system message that had to be sent as a user message.
+const systemNotePrefix = "[系统提示] "
+
+// demoteMidSystem returns msgs with every system message after the first position turned into a user message.
+// The input slice is not modified. Non-string contents (multimodal parts) are left alone.
+func demoteMidSystem(msgs []Message) ([]Message, bool) {
+	changed := false
+	out := make([]Message, len(msgs))
+	copy(out, msgs)
+	for i := 1; i < len(out); i++ {
+		if out[i].Role != "system" {
+			continue
+		}
+		if s, ok := out[i].Content.(string); ok {
+			out[i].Role, out[i].Content = "user", systemNotePrefix+s
+			changed = true
+		}
+	}
+	return out, changed
+}
+
+// isSystemPositionError recognises the chat-template error of backends that only allow a leading system message.
+func isSystemPositionError(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status < 400 {
+		return false
+	}
+	b := strings.ToLower(he.Body)
+	return strings.Contains(b, "system message must be at the beginning") ||
+		strings.Contains(b, "system message must be first")
 }
 
 func New(ep config.Endpoint) *Client { return &Client{EP: ep, HC: &http.Client{}} }
@@ -96,7 +134,10 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
 
-func (e *HTTPError) retriable() bool { return e.Status == 429 || e.Status >= 500 }
+// retriable: rate limits and server errors, except a chat-template rejection, which no retry can fix.
+func (e *HTTPError) retriable() bool {
+	return (e.Status == 429 || e.Status >= 500) && !isSystemPositionError(e)
+}
 
 func (c *Client) Complete(ctx context.Context, msgs []Message, temperature float64) (string, error) {
 	r, err := c.chat(ctx, msgs, nil, temperature)
@@ -108,6 +149,9 @@ func (c *Client) CompleteTools(ctx context.Context, msgs []Message, tools json.R
 }
 
 func (c *Client) chat(ctx context.Context, msgs []Message, tools json.RawMessage, temperature float64) (Result, error) {
+	if c.midSystemAsUser.Load() {
+		msgs, _ = demoteMidSystem(msgs)
+	}
 	payload := map[string]any{
 		"model": c.EP.Model, "messages": msgs, "temperature": temperature, "stream": false,
 	}
@@ -138,7 +182,15 @@ func (c *Client) chat(ctx context.Context, msgs []Message, tools json.RawMessage
 			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
-	if err := c.post(ctx, "/chat/completions", payload, &resp); err != nil {
+	err := c.post(ctx, "/chat/completions", payload, &resp)
+	if err != nil && isSystemPositionError(err) && !c.midSystemAsUser.Load() {
+		if fixed, changed := demoteMidSystem(msgs); changed {
+			c.midSystemAsUser.Store(true)
+			payload["messages"] = fixed
+			err = c.post(ctx, "/chat/completions", payload, &resp)
+		}
+	}
+	if err != nil {
 		return Result{}, err
 	}
 	if len(resp.Choices) == 0 {

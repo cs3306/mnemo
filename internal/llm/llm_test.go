@@ -137,3 +137,54 @@ func TestBalance(t *testing.T) {
 		t.Fatalf("%q %v", s, err)
 	}
 }
+
+// Strict chat templates (Qwen3 on llama-server --jinja) answer 500 "System message must be at the beginning" when the
+// tool loop appends a system notice. The client must resend it as a user message, and keep doing so afterwards.
+func TestMidSystemMessageDemotedAfterTemplateError(t *testing.T) {
+	RetryDelay = time.Millisecond
+	var n int32
+	var lastRoles []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&n, 1)
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		lastRoles = nil
+		for i, m := range body.Messages {
+			lastRoles = append(lastRoles, m.Role)
+			if m.Role == "system" && i > 0 {
+				http.Error(w, `{"error":{"code":500,"message":"Error: Jinja Exception: System message must be at the beginning."}}`, 500)
+				return
+			}
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+	c := New(config.Endpoint{BaseURL: srv.URL, Model: "m", Timeout: 5 * time.Second})
+	msgs := []Message{Text("system", "persona"), Text("user", "hi"), Text("system", "notice")}
+	got, err := c.Complete(context.Background(), msgs, 0)
+	if err != nil || got != "ok" {
+		t.Fatalf("got %q err %v", got, err)
+	}
+	if n != 2 || strings.Join(lastRoles, ",") != "system,user,user" {
+		t.Fatalf("calls=%d roles=%v", n, lastRoles)
+	}
+	if msgs[2].Role != "system" {
+		t.Fatal("caller's slice was modified")
+	}
+	n = 0
+	if _, err := c.Complete(context.Background(), msgs, 0); err != nil || n != 1 {
+		t.Fatalf("second call should demote up front: calls=%d err=%v", n, err)
+	}
+}
+
+func TestLeadingSystemUntouched(t *testing.T) {
+	out, changed := demoteMidSystem([]Message{Text("system", "a"), Text("user", "b")})
+	if changed || out[0].Role != "system" {
+		t.Fatalf("changed=%v %v", changed, out)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"companion/internal/config"
 	"companion/internal/llm"
 	"companion/internal/memory"
+	"companion/internal/speech"
 	"companion/internal/store"
 	"companion/internal/telegram"
 )
@@ -111,6 +112,12 @@ func run() int {
 	}
 	if cfg.Vision != nil {
 		deps.Vision = llm.New(*cfg.Vision)
+	}
+	if cfg.STT != nil {
+		deps.STT = speech.New(*cfg.STT)
+	}
+	if cfg.TTS != nil {
+		deps.TTS = speech.New(*cfg.TTS)
 	}
 	app, err := bot.New(cfg, deps)
 	if err != nil {

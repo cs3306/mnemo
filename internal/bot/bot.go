@@ -22,6 +22,7 @@ import (
 	"companion/internal/llm"
 	"companion/internal/memory"
 	"companion/internal/prompt"
+	"companion/internal/speech"
 	"companion/internal/store"
 	"companion/internal/style"
 	"companion/internal/telegram"
@@ -42,8 +43,9 @@ const help = `可用命令：
 /status  查看后端、记忆与 token 用量（含缓存命中率）
 /balance  查询 DeepSeek 账户余额
 /visiontest  检测读图模型是否真的能读图
+/voice  语音回复：/voice on 总是语音；auto 仅当我发语音时；off 关闭
 /plugins  查看插件工具；/plugins reload 重新发现
-发送图片即可读图（公式、手写、截图）。`
+发送图片即可读图（公式、手写、截图）；发送语音消息会先转成文字再回答（需启用 STT）。`
 
 const describePrompt = "请完整转写图片中的文字；数学公式用 LaTeX 写出，看不清或不确定的符号用 [?] 标出，不要猜。" +
 	"转写之后，用一两句话客观描述图片内容。只输出转写与描述。"
@@ -65,6 +67,7 @@ var commandMenu = []telegram.BotCommand{
 	{Command: "balance", Description: "DeepSeek 账户余额"},
 	{Command: "plugins", Description: "查看插件工具"},
 	{Command: "visiontest", Description: "检测读图模型是否真的能读图"},
+	{Command: "voice", Description: "语音回复：on / auto / off"},
 }
 
 // CommandSetter is implemented by the real Telegram client; test fakes may skip it.
@@ -92,12 +95,27 @@ type Messenger interface {
 	Download(ctx context.Context, fileID string) ([]byte, error)
 }
 
+// Transcriber turns a voice note into text; Synthesizer turns a reply into audio (internal/speech implements both).
+type Transcriber interface {
+	Transcribe(ctx context.Context, audio []byte, name, language string) (string, error)
+}
+type Synthesizer interface {
+	Synthesize(ctx context.Context, text, voice, format string) ([]byte, error)
+}
+
+// VoiceSender is implemented by the real Telegram client; test fakes may skip it.
+type VoiceSender interface {
+	SendVoice(ctx context.Context, chat int64, name string, data []byte) error
+}
+
 type Deps struct {
 	Store  *store.Store
 	Chat   llm.Completer
 	Maint  llm.Completer
 	Vision llm.Completer // nil disables image reading
 	Review llm.Completer // style review; nil uses Maint
+	STT    Transcriber   // nil: voice messages are not understood
+	TTS    Synthesizer   // nil: no voice replies
 	Embed  llm.Embedder
 	TG     Messenger
 	Now    func() time.Time
@@ -108,6 +126,9 @@ type App struct {
 	st            *store.Store
 	chat          llm.Completer
 	vision        llm.Completer
+	stt           Transcriber
+	tts           Synthesizer
+	ttsMode       atomic.Int32 // ttsOff / ttsAuto / ttsAlways, changed by /voice
 	review        llm.Completer
 	style         *style.Store
 	reviewing     atomic.Bool
@@ -148,6 +169,15 @@ func New(cfg *config.Config, d Deps) (*App, error) {
 		bg:           context.Background(),
 		tr:           &tracker{st: d.Store},
 		httpc:        &http.Client{},
+	}
+	a.stt, a.tts = d.STT, d.TTS
+	switch cfg.TTSMode {
+	case "off":
+		a.ttsMode.Store(ttsOff)
+	case "always":
+		a.ttsMode.Store(ttsAlways)
+	default:
+		a.ttsMode.Store(ttsAuto)
 	}
 	a.review = d.Review
 	if a.review == nil {
@@ -400,23 +430,136 @@ func (a *App) Handle(ctx context.Context, u telegram.Update) {
 		doc = m.Document
 	}
 
+	var voice *telegram.Voice // a voice note (or audio file): transcribed first, then handled like typed text
+	if m.Voice != nil {
+		voice = m.Voice
+	} else if m.Audio != nil && strings.HasPrefix(m.Audio.MimeType, "audio/") {
+		voice = m.Audio
+	}
+
 	l := a.chatLock(chat)
 	l.Lock()
 	defer l.Unlock()
 	a.touch(chat)
 	defer a.touch(chat)
 	switch {
-	case strings.HasPrefix(text, "/") && fileID == "" && doc == nil:
+	case strings.HasPrefix(text, "/") && fileID == "" && doc == nil && voice == nil:
 		a.command(ctx, chat, text)
-	case text != "" || fileID != "" || doc != nil:
+	case text != "" || fileID != "" || doc != nil || voice != nil:
+		if voice != nil {
+			var ok bool
+			if text, ok = a.receiveVoice(ctx, chat, voice, text); !ok {
+				return
+			}
+		}
 		if doc != nil {
 			var ok bool
 			if text, ok = a.receiveDoc(ctx, chat, doc, text); !ok {
 				return
 			}
 		}
-		a.turn(ctx, chat, text, fileID, mime)
+		a.turn(ctx, chat, text, fileID, mime, voice != nil)
 	}
+}
+
+// receiveVoice downloads and transcribes a voice note, shows the user what was heard (so a misheard word is
+// visible) and returns the text to answer. A caption is kept in front of the transcript.
+func (a *App) receiveVoice(ctx context.Context, chat int64, v *telegram.Voice, caption string) (string, bool) {
+	if a.stt == nil {
+		a.send(ctx, chat, "当前没有启用语音识别（设置 STT_ENABLED=true 以及 STT_BASE_URL / STT_MODEL）")
+		return "", false
+	}
+	a.tg.Typing(ctx, chat)
+	data, err := a.tg.Download(ctx, v.FileID)
+	if err != nil {
+		a.send(ctx, chat, "下载语音失败："+truncate(err.Error(), 200))
+		return "", false
+	}
+	heard, err := a.stt.Transcribe(ctx, data, "voice"+audioExt(v.MimeType), a.cfg.STTLanguage)
+	if err != nil {
+		slog.Warn("transcription failed", "err", err)
+		a.send(ctx, chat, "语音识别失败："+truncate(err.Error(), 200))
+		return "", false
+	}
+	if heard == "" {
+		a.send(ctx, chat, "没听清，请再说一次")
+		return "", false
+	}
+	a.send(ctx, chat, "🎤 "+heard)
+	if caption != "" {
+		heard = caption + "\n" + heard
+	}
+	return heard, true
+}
+
+func audioExt(mime string) string {
+	switch strings.ToLower(mime) {
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/aac":
+		return ".m4a"
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return ".wav"
+	case "audio/flac":
+		return ".flac"
+	default:
+		return ".ogg" // Telegram voice notes are OGG/Opus
+	}
+}
+
+const (
+	ttsOff int32 = iota
+	ttsAuto
+	ttsAlways
+)
+
+// wantVoice reports whether this turn's reply should also (or only) be spoken.
+func (a *App) wantVoice(voiceIn bool) bool {
+	if a.tts == nil {
+		return false
+	}
+	if _, ok := a.tg.(VoiceSender); !ok {
+		return false
+	}
+	switch a.ttsMode.Load() {
+	case ttsAlways:
+		return true
+	case ttsAuto:
+		return voiceIn
+	}
+	return false
+}
+
+// speak sends text as a voice message and reports whether it did. It never fails the turn: on any problem the
+// caller still has the text reply.
+func (a *App) speak(ctx context.Context, chat int64, text string) bool {
+	clean := speech.CleanForSpeech(text, a.cfg.TTSMaxChars)
+	if clean == "" {
+		return false
+	}
+	vs, ok := a.tg.(VoiceSender)
+	if !ok || a.tts == nil {
+		return false
+	}
+	a.tg.Typing(ctx, chat)
+	format := a.cfg.TTSFormat
+	if format == "" {
+		format = "mp3"
+	}
+	audio, err := a.tts.Synthesize(ctx, clean, a.cfg.TTSVoice, format)
+	if err != nil {
+		slog.Warn("speech synthesis failed", "err", err)
+		return false
+	}
+	ext := ".mp3"
+	if format == "opus" {
+		ext = ".ogg"
+	}
+	if err := vs.SendVoice(ctx, chat, "reply"+ext, audio); err != nil {
+		slog.Warn("sending voice failed", "err", err)
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------- one chat turn
@@ -432,7 +575,7 @@ var (
 	errEmpty     = errors.New("模型没有返回内容，请再说一次")
 )
 
-func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string) {
+func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string, voiceIn bool) {
 	a.tg.Typing(ctx, chat)
 	var imgs []Image
 	if fileID != "" {
@@ -453,7 +596,17 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string) {
 		a.send(ctx, chat, "出错了："+truncate(err.Error(), 200))
 		return
 	}
-	a.sendReply(ctx, chat, r.Text)
+	voiceOut := a.wantVoice(voiceIn)
+	spoke := false
+	if voiceOut && !a.cfg.TTSText {
+		spoke = a.speak(ctx, chat, r.Text) // voice only; fall back to text when speaking is not possible
+	}
+	if !spoke {
+		a.sendReply(ctx, chat, r.Text)
+		if voiceOut && a.cfg.TTSText {
+			a.speak(ctx, chat, r.Text)
+		}
+	}
 	a.deliverFiles(ctx, chat, r.Files)
 }
 
@@ -979,6 +1132,24 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 			return
 		}
 		reply(a.pluginStatus())
+	case "/voice":
+		if a.tts == nil {
+			reply("当前没有启用语音回复（设置 TTS_ENABLED=true 以及 TTS_BASE_URL / TTS_MODEL）")
+			return
+		}
+		switch strings.ToLower(rest) {
+		case "on", "always":
+			a.ttsMode.Store(ttsAlways)
+		case "auto":
+			a.ttsMode.Store(ttsAuto)
+		case "off":
+			a.ttsMode.Store(ttsOff)
+		case "":
+		default:
+			reply("用法：/voice on | auto | off")
+			return
+		}
+		reply(map[int32]string{ttsOff: "语音回复：关闭", ttsAuto: "语音回复：auto（你发语音时我才用语音回）", ttsAlways: "语音回复：总是"}[a.ttsMode.Load()] + "（重启后恢复为 TTS_MODE）")
 	case "/visiontest":
 		if a.vision == nil {
 			reply(errVisionOff.Error())

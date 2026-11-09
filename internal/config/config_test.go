@@ -94,3 +94,39 @@ func TestPluginURLs(t *testing.T) {
 		t.Fatal("empty means no plugins")
 	}
 }
+
+func TestVoiceConfig(t *testing.T) {
+	base := map[string]string{"TELEGRAM_TOKEN": "t", "LLM_BASE_URL": "http://x", "LLM_MODEL": "m", "EMBED_BASE_URL": "http://x", "EMBED_MODEL": "e"}
+	load := func(extra map[string]string) *Config {
+		c, err := Load(func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
+			return base[k]
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	c := load(nil)
+	if c.STT != nil || c.TTS != nil || len(c.Validate()) != 0 {
+		t.Fatalf("voice must be off by default: %+v", c.Validate())
+	}
+	c = load(map[string]string{"STT_ENABLED": "true", "TTS_ENABLED": "true"})
+	if len(c.Validate()) != 2 {
+		t.Fatalf("missing URL/model must be reported: %v", c.Validate())
+	}
+	c = load(map[string]string{"STT_ENABLED": "1", "STT_BASE_URL": "http://s/v1/", "STT_MODEL": "w", "TTS_ENABLED": "1",
+		"TTS_BASE_URL": "http://t/v1", "TTS_MODEL": "k", "TTS_EXTRA_BODY": `{"speed":1.2}`})
+	if errs := c.Validate(); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if c.STT.BaseURL != "http://s/v1" || c.TTSFormat != "mp3" || c.TTSMode != "auto" || c.TTSMaxChars != 500 || !c.TTSText || c.TTS.ExtraBody["speed"] != 1.2 {
+		t.Fatalf("defaults wrong: %+v %+v", c, c.TTS)
+	}
+	c = load(map[string]string{"TTS_ENABLED": "1", "TTS_BASE_URL": "http://t", "TTS_MODEL": "k", "TTS_FORMAT": "wav", "TTS_MODE": "x"})
+	if len(c.Validate()) != 2 {
+		t.Fatalf("bad format/mode must be rejected: %v", c.Validate())
+	}
+}

@@ -207,6 +207,7 @@ The backend can be any OpenAI-compatible endpoint (DeepSeek API, Qwen on local l
 - **Self-optimizing memory**: extraction every N turns (only what the user actually said) → dedupe/update against existing entries (old ones are marked superseded, not deleted) → idle-time rolling summary and consolidation (archive stale low-importance items, merge duplicates, rewrite the core profile; automatic backup first).
 - **Learning tracker**: records topic status and recurring mistake patterns, referenced in later conversations.
 - **Memory survives model swaps** (see below).
+- **Voice**: with `STT_ENABLED=true`, a voice note is transcribed (the bot first shows `🎤 <what it heard>`) and answered like typed text. With `TTS_ENABLED=true` replies can be spoken: `TTS_MODE=auto` answers voice notes with voice (plus the text, `TTS_TEXT`), `always` speaks every reply, `/voice on|auto|off` switches at runtime. Code-heavy or long replies (`TTS_MAX_CHARS`) stay text-only. Both use OpenAI-compatible `/audio/transcriptions` and `/audio/speech` endpoints.
 - **Image reading**: just send a picture (needs a vision-capable model). A startup self-test with a random digit image catches models that cannot actually read images and would otherwise invent a transcription.
 - All data lives in `/data` (JSONL + snapshot). No database service.
 

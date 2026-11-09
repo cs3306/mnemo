@@ -30,6 +30,16 @@ type Message struct {
 	Caption  string      `json:"caption"`
 	Photo    []PhotoSize `json:"photo"`
 	Document *Document   `json:"document"`
+	Voice    *Voice      `json:"voice"`
+	Audio    *Voice      `json:"audio"`
+}
+
+// Voice is a voice note (OGG/Opus) or an uploaded audio file; both carry the same fields we use.
+type Voice struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
+	MimeType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
 }
 
 type Chat struct {
@@ -185,6 +195,15 @@ func (c *Client) SendFile(ctx context.Context, chat int64, name, mime string, da
 	if (mime == "image/png" || mime == "image/jpeg") && len(data) <= 9<<20 {
 		method, field = "sendPhoto", "photo"
 	}
+	return c.upload(ctx, chat, method, field, name, data)
+}
+
+// SendVoice sends audio as a voice message (OGG/Opus, MP3 or M4A; the extension of name tells which).
+func (c *Client) SendVoice(ctx context.Context, chat int64, name string, data []byte) error {
+	return c.upload(ctx, chat, "sendVoice", "voice", name, data)
+}
+
+func (c *Client) upload(ctx context.Context, chat int64, method, field, name string, data []byte) error {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	_ = w.WriteField("chat_id", fmt.Sprint(chat))

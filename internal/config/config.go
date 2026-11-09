@@ -36,6 +36,15 @@ type Config struct {
 	Embed       Endpoint
 	Review      Endpoint // style review (REVIEW_*); falls back to MAINT_*
 
+	STT         *Endpoint // speech to text (STT_*); nil = voice messages are not understood
+	STTLanguage string    // STT_LANGUAGE, ISO code like "zh"; empty = let the server detect
+	TTS         *Endpoint // text to speech (TTS_*); nil = no voice replies
+	TTSVoice    string
+	TTSFormat   string // mp3 (default) | opus | ...: what Telegram's sendVoice accepts
+	TTSMode     string // off | auto (voice reply only to voice messages, default) | always
+	TTSMaxChars int    // longer replies are sent as text only
+	TTSText     bool   // also send the text of a voice reply (default true)
+
 	Temperature      float64
 	RecentTokens     int
 	MemoryTokens     int
@@ -192,6 +201,22 @@ func Load(getenv func(string) string) (*Config, error) {
 		c.VisionProbe = e.boolean("VISION_PROBE", true)
 	}
 	c.Embed = e.endpoint("EMBED", nil)
+	if e.boolean("STT_ENABLED", false) {
+		v := e.endpoint("STT", nil)
+		v.Timeout = time.Duration(e.float("STT_TIMEOUT", 120) * float64(time.Second))
+		c.STT = &v
+		c.STTLanguage = e.str("STT_LANGUAGE", "")
+	}
+	if e.boolean("TTS_ENABLED", false) {
+		v := e.endpoint("TTS", nil)
+		v.Timeout = time.Duration(e.float("TTS_TIMEOUT", 120) * float64(time.Second))
+		c.TTS = &v
+		c.TTSVoice = e.str("TTS_VOICE", "")
+		c.TTSFormat = strings.ToLower(e.str("TTS_FORMAT", "mp3"))
+		c.TTSMode = strings.ToLower(e.str("TTS_MODE", "auto"))
+		c.TTSMaxChars = e.integer("TTS_MAX_CHARS", 500)
+		c.TTSText = e.boolean("TTS_TEXT", true)
+	}
 	c.Review = e.endpoint("REVIEW", &c.Maint)
 	if _, ok := c.Review.ExtraBody["max_tokens"]; !ok {
 		// some OpenAI-compatible providers (e.g. Claude's compatibility layer) want an explicit limit
@@ -280,6 +305,20 @@ func (c *Config) Validate() []string {
 	}
 	if c.Embed.BaseURL == "" || c.Embed.Model == "" {
 		errs = append(errs, "EMBED_BASE_URL and EMBED_MODEL are required")
+	}
+	if c.STT != nil && (c.STT.BaseURL == "" || c.STT.Model == "") {
+		errs = append(errs, "STT_BASE_URL and STT_MODEL are required when STT_ENABLED=true")
+	}
+	if c.TTS != nil {
+		if c.TTS.BaseURL == "" || c.TTS.Model == "" {
+			errs = append(errs, "TTS_BASE_URL and TTS_MODEL are required when TTS_ENABLED=true")
+		}
+		if c.TTSFormat != "mp3" && c.TTSFormat != "opus" {
+			errs = append(errs, "TTS_FORMAT must be mp3 or opus (what Telegram voice messages accept)")
+		}
+		if c.TTSMode != "off" && c.TTSMode != "auto" && c.TTSMode != "always" {
+			errs = append(errs, "TTS_MODE must be off, auto or always")
+		}
 	}
 	return errs
 }

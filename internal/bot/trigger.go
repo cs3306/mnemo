@@ -72,14 +72,14 @@ func (a *App) runScheduled(chat int64, label, prompt string) {
 	a.tg.Typing(ctx, chat)
 	instruction := fmt.Sprintf("[定时任务「%s」到点了。这是用户事先设好的任务，不是用户刚刚发来的消息。请直接完成它，像平时聊天一样把结果发给用户；"+
 		"不要说“收到任务”之类的话，也不要把这段说明复述出来。]\n%s", label, prompt)
-	r, err := a.RespondTools(ctx, chat, "", nil, TurnOpts{Instruction: instruction, Deliver: a.canSendFiles()})
+	r, err := a.RespondTools(ctx, chat, "", nil, TurnOpts{Instruction: instruction, Deliver: a.canSendFiles(), Voice: a.voiceReady()})
 	if err != nil {
 		slog.Warn("scheduled turn failed", "label", label, "err", err)
 		a.send(ctx, chat, fmt.Sprintf("定时任务「%s」没有成功：%s", label, truncate(err.Error(), 200)))
 		return
 	}
 	text := strings.TrimSpace(r.Text)
-	if text == "" && len(r.Files) == 0 {
+	if text == "" && len(r.Files) == 0 && !r.VoiceSent {
 		text = fmt.Sprintf("定时任务「%s」跑完了，但模型没有给出任何内容。", label)
 	}
 	slog.Info("scheduled task finished", "label", label, "chars", len([]rune(text)), "files", len(r.Files))

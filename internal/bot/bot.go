@@ -590,18 +590,18 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string, v
 		}
 		imgs = []Image{{Data: data, Mime: mime}}
 	}
-	r, err := a.RespondTools(ctx, chat, text, imgs, TurnOpts{Deliver: a.canSendFiles()})
+	r, err := a.RespondTools(ctx, chat, text, imgs, TurnOpts{Deliver: a.canSendFiles(), Voice: a.voiceReady()})
 	if err != nil {
 		slog.Warn("turn failed", "err", err)
 		a.send(ctx, chat, "出错了："+truncate(err.Error(), 200))
 		return
 	}
-	voiceOut := a.wantVoice(voiceIn)
+	voiceOut := a.wantVoice(voiceIn) && !r.VoiceSent // she already spoke on her own: do not read the text out again
 	spoke := false
 	if voiceOut && !a.cfg.TTSText {
 		spoke = a.speak(ctx, chat, r.Text) // voice only; fall back to text when speaking is not possible
 	}
-	if !spoke {
+	if !spoke && r.Text != "" {
 		a.sendReply(ctx, chat, r.Text)
 		if voiceOut && a.cfg.TTSText {
 			a.speak(ctx, chat, r.Text)
@@ -638,6 +638,7 @@ type TurnOpts struct {
 	Tail  []llm.Message   // the client's messages after the user message: assistant tool_calls + tool results
 
 	Deliver bool // the frontend can send files produced by plugin tools (Telegram)
+	Voice   bool // the frontend can send voice messages, so the send_voice tool is offered (Telegram)
 
 	// Instruction makes this a scheduled turn: nobody just spoke. The text is shown to the model as the latest
 	// message but is never stored as something the user said; only the reply joins the conversation.
@@ -650,6 +651,7 @@ type Reply struct {
 	ToolCalls json.RawMessage
 	Reasoning string
 	Files     []OutFile // produced by plugin tools during the turn, to be delivered by the frontend
+	VoiceSent bool      // she already sent a voice message herself (send_voice) this turn
 }
 
 func (a *App) describeImages(ctx context.Context, imgs []Image) (string, error) {
@@ -752,13 +754,20 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 	msgs = append(msgs, opts.Tail...)
 
 	a.ensurePlugins(ctx)
-	ts := &turnState{chat: chat, deliver: opts.Deliver && a.canSendFiles()}
+	ts := &turnState{chat: chat, deliver: opts.Deliver && a.canSendFiles(), voice: opts.Voice && a.voiceReady()}
 	if opts.Deliver {
 		ts.notify = func(s string) { a.send(ctx, chat, s) }
 	}
 	tools, err := a.mergeTools(opts.Tools)
 	if err != nil {
 		return Reply{}, err
+	}
+	if ts.voice {
+		var arr []json.RawMessage
+		if len(tools) > 0 {
+			_ = json.Unmarshal(tools, &arr)
+		}
+		tools, _ = json.Marshal(append(arr, a.voiceToolDef()))
 	}
 	tc, canTools := a.chat.(llm.ToolCompleter)
 	if len(tools) > 0 && !canTools {
@@ -819,10 +828,17 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 		rounds++
 	}
 	reply := res.Text
-	if reply == "" {
+	if reply == "" && len(ts.spoken) == 0 {
 		return Reply{}, errEmpty
 	}
-	if _, err := a.st.AddMessage(chat, "assistant", reply); err != nil {
+	stored := reply
+	if len(ts.spoken) > 0 { // keep what she said aloud in the history, so she remembers it
+		stored = "（发了语音：" + strings.Join(ts.spoken, " / ") + "）"
+		if reply != "" {
+			stored += "\n" + reply
+		}
+	}
+	if _, err := a.st.AddMessage(chat, "assistant", stored); err != nil {
 		slog.Warn("saving reply failed", "err", err)
 	}
 	a.mm.Touch(mems)
@@ -841,7 +857,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 			}
 		})
 	}
-	return Reply{Text: reply, Files: ts.files}, nil
+	return Reply{Text: reply, Files: ts.files, VoiceSent: len(ts.spoken) > 0}, nil
 }
 
 func truncate(s string, n int) string {

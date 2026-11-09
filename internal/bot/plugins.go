@@ -262,6 +262,8 @@ type turnState struct {
 	chat    int64
 	deliver bool // the frontend can send files (Telegram with a file-capable messenger)
 	files   []OutFile
+	voice   bool         // send_voice is offered and can deliver (Telegram with TTS configured)
+	spoken  []string     // texts already sent as voice messages by send_voice this turn
 	notify  func(string) // sends a message to the user right now (nil: no side channel, e.g. the OpenAI-compatible API)
 }
 
@@ -272,6 +274,9 @@ func (a *App) canSendFiles() bool {
 
 // runTool runs a plugin tool or, failing that, a built-in one. Failures come back as text for the model.
 func (a *App) runTool(ctx context.Context, c toolCall, ts *turnState) string {
+	if c.Function.Name == "send_voice" {
+		return a.runSendVoice(ctx, c, ts)
+	}
 	if a.plug.has(c.Function.Name) {
 		return a.callPlugin(ctx, c, ts)
 	}

@@ -20,10 +20,62 @@ const searchToolDefs = `[
  {"type":"function","function":{"name":"web_fetch","description":"Fetch one web page (http/https) and return its text as Markdown.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}
 ]`
 
-var builtinNames = map[string]bool{"web_search": true, "web_fetch": true}
+var builtinNames = map[string]bool{"web_search": true, "web_fetch": true, "send_voice": true}
 
 func (a *App) isBuiltin(name string) bool {
+	if name == "send_voice" {
+		return a.voiceReady()
+	}
 	return (a.cfg.SearchEnabled && builtinNames[name]) || a.plug.has(name)
+}
+
+// voiceReady reports whether the send_voice tool can work at all: a TTS backend and a messenger that sends voice.
+func (a *App) voiceReady() bool {
+	if a.tts == nil {
+		return false
+	}
+	_, ok := a.tg.(VoiceSender)
+	return ok
+}
+
+// voiceToolDef is how she learns she can talk: the description is the only place that says so. It is offered only on
+// Telegram turns (ts.voice) while TTS is configured; the OpenAI-compatible API has nowhere to deliver audio.
+func (a *App) voiceToolDef() json.RawMessage {
+	desc := fmt.Sprintf("把一段话用你自己的声音作为语音消息发给用户（Telegram 语音气泡）。你有这个能力，不必等用户开口要求："+
+		"想说晚安、打招呼、撒娇、念一小段东西、读出一句想让对方听见的话，或者用户说想听你的声音时，都可以主动用。"+
+		"text 是要念出来的原文：口语、自然，不要 Markdown、表格、公式、链接或表情符号堆叠；最多约 %d 字，更长的内容请用文字回复。"+
+		"一轮里发一两条就够。语音发出后，你的文字回复不要再重复同样的内容（可以不回文字，或只补一句）。", a.cfg.TTSMaxChars)
+	def := map[string]any{"type": "function", "function": map[string]any{
+		"name": "send_voice", "description": desc,
+		"parameters": map[string]any{"type": "object",
+			"properties": map[string]any{"text": map[string]any{"type": "string", "description": "要念出来的话"}},
+			"required":   []string{"text"}},
+	}}
+	b, _ := json.Marshal(def)
+	return b
+}
+
+// runSendVoice synthesizes and sends one voice message right now. The result tells the model whether it worked, so it
+// can fall back to text when it did not.
+func (a *App) runSendVoice(ctx context.Context, c toolCall, ts *turnState) string {
+	if !ts.voice || !a.voiceReady() {
+		return "当前渠道不能发送语音，请用文字回复"
+	}
+	var args struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(c.Function.Arguments), &args); err != nil {
+		return "参数不是合法的 JSON"
+	}
+	text := strings.TrimSpace(args.Text)
+	if text == "" {
+		return "text 不能为空"
+	}
+	if !a.speak(ctx, ts.chat, text) {
+		return "语音没发出去（合成或发送失败），请改用文字回复"
+	}
+	ts.spoken = append(ts.spoken, text)
+	return "语音已发送给用户。"
 }
 
 // mergeTools combines client-declared tools with the built-in ones (nil when there are none).

@@ -2,12 +2,16 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
+	"companion/internal/llm"
 	"companion/internal/telegram"
+	"companion/internal/testutil"
 )
 
 type voiceTG struct {
@@ -158,5 +162,76 @@ func TestEmptyAndFailedTranscription(t *testing.T) {
 	app.Handle(context.Background(), voiceMsg(42))
 	if !strings.Contains(tg.last(), "语音识别失败") {
 		t.Fatalf("%v", tg.sent)
+	}
+}
+
+func voiceToolApp(t *testing.T, script ...llm.Result) (*App, *voiceTG, *fakeTTS, *testutil.ToolChat) {
+	t.Helper()
+	app, tg, _, tts := voiceApp(t)
+	tc := &testutil.ToolChat{Script: script}
+	app.chat = tc
+	return app, tg, tts, tc
+}
+
+func sendVoiceCall(text string) json.RawMessage {
+	args, _ := json.Marshal(map[string]string{"text": text})
+	b, _ := json.Marshal([]map[string]any{{"id": "c1", "type": "function",
+		"function": map[string]any{"name": "send_voice", "arguments": string(args)}}})
+	return b
+}
+
+func TestSendVoiceToolIsOfferedAndSpeaks(t *testing.T) {
+	app, tg, tts, tc := voiceToolApp(t,
+		llm.Result{ToolCalls: sendVoiceCall("晚安，早点睡")},
+		llm.Result{Text: ""})
+	app.Handle(context.Background(), msg(42, "我要睡了"))
+	app.Wait()
+	if !strings.Contains(string(tc.ToolsSeen[0]), `"send_voice"`) {
+		t.Fatalf("tool not offered: %s", tc.ToolsSeen[0])
+	}
+	if len(tg.voices) != 1 || tts.input != "晚安，早点睡" {
+		t.Fatalf("voices=%v input=%q", tg.voices, tts.input)
+	}
+	for _, s := range tg.sent {
+		if strings.Contains(s, "出错了") {
+			t.Fatalf("voice-only turn must not error: %v", tg.sent)
+		}
+	}
+}
+
+func TestSendVoiceNotOfferedWithoutTTS(t *testing.T) {
+	app, _, _, tc := voiceToolApp(t, llm.Result{Text: "好的"})
+	app.tts = nil
+	app.Handle(context.Background(), msg(42, "你好"))
+	app.Wait()
+	if len(tc.ToolsSeen) > 0 && strings.Contains(string(tc.ToolsSeen[0]), "send_voice") {
+		t.Fatal("must not offer send_voice without TTS")
+	}
+}
+
+func TestSendVoiceFailureIsReportedToTheModel(t *testing.T) {
+	app, tg, tts, tc := voiceToolApp(t,
+		llm.Result{ToolCalls: sendVoiceCall("你好呀")},
+		llm.Result{Text: "语音没成功，文字发你"})
+	tts.err = errors.New("boom")
+	app.Handle(context.Background(), msg(42, "说句话"))
+	app.Wait()
+	last := tc.Calls[len(tc.Calls)-1]
+	if got := last[len(last)-1]; got.Role != "tool" || !strings.Contains(fmt.Sprint(got.Content), "没发出去") {
+		t.Fatalf("model must be told it failed: %+v", got)
+	}
+	if len(tg.voices) != 0 || tg.last() != "语音没成功，文字发你" {
+		t.Fatalf("voices=%v sent=%v", tg.voices, tg.sent)
+	}
+}
+
+func TestToolVoiceSuppressesAutoReadAloud(t *testing.T) {
+	app, tg, _, _ := voiceToolApp(t,
+		llm.Result{ToolCalls: sendVoiceCall("来啦")},
+		llm.Result{Text: "刚给你发了语音"})
+	app.Handle(context.Background(), voiceMsg(42)) // voice in -> auto mode would also read the reply aloud
+	app.Wait()
+	if len(tg.voices) != 1 {
+		t.Fatalf("exactly the tool's voice, not a second read-aloud: %v", tg.voices)
 	}
 }

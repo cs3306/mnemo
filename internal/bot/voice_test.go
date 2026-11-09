@@ -289,3 +289,41 @@ func TestSingleVoiceHasNoVoiceParameter(t *testing.T) {
 		t.Fatalf("one voice needs no choice: %s", tc.ToolsSeen[0])
 	}
 }
+
+func TestCopiedVoiceNoteIsSpokenNotShown(t *testing.T) {
+	app, tg, tts, _ := voiceToolApp(t, llm.Result{Text: "（发了语音：晚安，早点睡）\n嘿嘿，明天见"})
+	app.Handle(context.Background(), msg(42, "我要睡了"))
+	app.Wait()
+	if len(tg.voices) != 1 || tts.input != "晚安，早点睡" {
+		t.Fatalf("the note must be spoken: voices=%v input=%q", tg.voices, tts.input)
+	}
+	for _, s := range tg.sent {
+		if strings.Contains(s, "发了语音") {
+			t.Fatalf("the note must never be shown: %v", tg.sent)
+		}
+	}
+	if tg.last() != "嘿嘿，明天见" {
+		t.Fatalf("the rest of the reply should still be sent: %v", tg.sent)
+	}
+}
+
+func TestCopiedVoiceNoteFallsBackToTextWhenSpeakingFails(t *testing.T) {
+	app, tg, tts, _ := voiceToolApp(t, llm.Result{Text: "（发了语音：晚安）"})
+	tts.err = errors.New("down")
+	app.Handle(context.Background(), msg(42, "我要睡了"))
+	app.Wait()
+	if len(tg.voices) != 0 || tg.last() != "晚安" {
+		t.Fatalf("voices=%v sent=%v", tg.voices, tg.sent)
+	}
+}
+
+func TestVoiceNoteAfterRealToolCallIsDropped(t *testing.T) {
+	app, tg, tts, _ := voiceToolApp(t,
+		llm.Result{ToolCalls: sendVoiceCall("晚安")},
+		llm.Result{Text: "（发了语音：晚安）\n好梦"})
+	app.Handle(context.Background(), msg(42, "我要睡了"))
+	app.Wait()
+	if len(tg.voices) != 1 || tts.input != "晚安" || tg.last() != "好梦" {
+		t.Fatalf("voices=%v input=%q sent=%v", tg.voices, tts.input, tg.sent)
+	}
+}

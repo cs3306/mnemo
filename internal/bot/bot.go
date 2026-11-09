@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -830,7 +831,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 		}
 		rounds++
 	}
-	reply := res.Text
+	reply := a.rescueVoiceMarker(ctx, res.Text, ts)
 	if reply == "" && len(ts.spoken) == 0 {
 		return Reply{}, errEmpty
 	}
@@ -1196,4 +1197,29 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 	default:
 		reply("未知命令。发送 /help 查看可用命令。")
 	}
+}
+
+// voiceMarkerRe matches the history note "（发了语音：……）" at the start of a reply. The history stores that note for the
+// voice messages she sent, and she sometimes copies it into her text instead of calling send_voice.
+var voiceMarkerRe = regexp.MustCompile(`(?s)^\s*[（(〔\[]\s*(?:send_voice\s*)?(?:已)?(?:发了?|发出)语音\s*[：:]\s*(.*?)\s*[）)〕\]]\s*`)
+
+// rescueVoiceMarker turns a copied "（发了语音：X）" into what she meant: X is spoken (when she can speak and has not
+// already) and the note never reaches the user as text. If speaking is impossible or fails, X is shown as text.
+func (a *App) rescueVoiceMarker(ctx context.Context, text string, ts *turnState) string {
+	m := voiceMarkerRe.FindStringSubmatch(text)
+	if m == nil {
+		return text
+	}
+	inner, rest := strings.TrimSpace(m[1]), strings.TrimSpace(text[len(m[0]):])
+	switch {
+	case inner == "":
+		return rest
+	case len(ts.spoken) > 0: // she did call the tool this turn; the note is just noise
+		return rest
+	case ts.voice && a.speak(ctx, ts.chat, inner, ""):
+		slog.Info("voice note written as text instead of calling send_voice; spoke it")
+		ts.spoken = append(ts.spoken, inner)
+		return rest
+	}
+	return strings.TrimSpace(inner + "\n" + rest)
 }

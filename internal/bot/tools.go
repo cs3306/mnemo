@@ -44,7 +44,8 @@ func (a *App) voiceToolDef() json.RawMessage {
 	desc := fmt.Sprintf("把一段话用你自己的声音作为语音消息发给用户（Telegram 语音气泡）。你有这个能力，不必等用户开口要求："+
 		"想说晚安、打招呼、撒娇、念一小段东西、读出一句想让对方听见的话，或者用户说想听你的声音时，都可以主动用。"+
 		"text 是要念出来的原文：口语、自然，不要 Markdown、表格、公式、链接或表情符号堆叠；最多约 %d 字，更长的内容请用文字回复。"+
-		"一轮里发一两条就够。语音发出后，你的文字回复不要再重复同样的内容（可以不回文字，或只补一句）。", a.cfg.TTSMaxChars)
+		"一轮里发一两条就够。语音发出后，你的文字回复不要再重复同样的内容（可以不回文字，或只补一句）。"+
+		"注意：聊天记录里形如“（发了语音：……）”的只是系统替你记下的备注，不是你要写的内容；想发语音必须真的调用本工具，在文字里写这种备注用户什么也听不到。", a.cfg.TTSMaxChars)
 	props := map[string]any{"text": map[string]any{"type": "string", "description": "要念出来的话"}}
 	if len(a.cfg.TTSVoices) > 1 {
 		var names []string

@@ -157,7 +157,7 @@ func TestMidSystemMessageDemotedAfterTemplateError(t *testing.T) {
 		for i, m := range body.Messages {
 			lastRoles = append(lastRoles, m.Role)
 			if m.Role == "system" && i > 0 {
-				http.Error(w, `{"error":{"code":500,"message":"Error: Jinja Exception: System message must be at the beginning."}}`, 500)
+				http.Error(w, llamaTemplateError, 500)
 				return
 			}
 		}
@@ -186,5 +186,41 @@ func TestLeadingSystemUntouched(t *testing.T) {
 	out, changed := demoteMidSystem([]Message{Text("system", "a"), Text("user", "b")})
 	if changed || out[0].Role != "system" {
 		t.Fatalf("changed=%v %v", changed, out)
+	}
+}
+
+// Real llama-server body: the phrase appears inside a long trace, so the 300-char Body truncation cuts the
+// final occurrence off. Detection must not depend on the tail.
+const llamaTemplateError = `{"error":{"code":500,"message":"\n------------\nWhile executing CallExpression at line 106, column 32 in source:\n...first %}↵            {{- raise_exception('System message must be at the beginnin...\n                                           ^\nError: Jinja Exception: System message must be at the beginning.","type":"server_error"}}`
+
+func TestSystemPositionErrorSurvivesTruncatedBody(t *testing.T) {
+	RetryDelay = time.Millisecond
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&n, 1)
+		var body struct {
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		for i, m := range body.Messages {
+			if m.Role == "system" && i > 0 {
+				http.Error(w, strings.Repeat(" ", 0)+llamaTemplateError, 500)
+				return
+			}
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+	c := New(config.Endpoint{BaseURL: srv.URL, Model: "m", Timeout: 5 * time.Second})
+	msgs := []Message{Text("system", "p"), Text("user", "hi"), Text("system", "n")}
+	if got, err := c.Complete(context.Background(), msgs, 0); err != nil || got != "ok" || n != 2 {
+		t.Fatalf("got %q err %v calls %d", got, err, n)
+	}
+	// and the truncated form alone must still be recognised
+	cut := &HTTPError{Status: 500, Body: llamaTemplateError[:300]}
+	if !isSystemPositionError(cut) {
+		t.Fatal("truncated body not recognised")
 	}
 }

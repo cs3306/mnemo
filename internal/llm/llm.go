@@ -117,8 +117,14 @@ func isSystemPositionError(err error) bool {
 	if !errors.As(err, &he) || he.Status < 400 {
 		return false
 	}
-	b := strings.ToLower(he.Body)
-	return strings.Contains(b, "system message must be at the beginning") ||
+	return he.sysPos || systemPositionText(he.Body)
+}
+
+// systemPositionText matches on a prefix of the phrase because HTTPError.Body is truncated and llama.cpp
+// repeats the message in a long Jinja trace, so the final "...beginning." can be cut off.
+func systemPositionText(body string) bool {
+	b := strings.ToLower(body)
+	return strings.Contains(b, "system message must be at the begin") ||
 		strings.Contains(b, "system message must be first")
 }
 
@@ -130,6 +136,7 @@ func (c *Client) Model() string { return c.EP.Model }
 type HTTPError struct {
 	Status int
 	Body   string
+	sysPos bool // the full (untruncated) body was a "system message must be at the beginning" template error
 }
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
@@ -356,10 +363,11 @@ func (c *Client) post(ctx context.Context, path string, payload, out any) error 
 			}
 			if resp.StatusCode >= 400 {
 				msg := string(b)
+				sysPos := systemPositionText(msg)
 				if len(msg) > 300 {
 					msg = msg[:300]
 				}
-				return &HTTPError{Status: resp.StatusCode, Body: msg}
+				return &HTTPError{Status: resp.StatusCode, Body: msg, sysPos: sysPos}
 			}
 			return json.Unmarshal(b, out)
 		}()

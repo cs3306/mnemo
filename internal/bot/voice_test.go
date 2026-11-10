@@ -327,3 +327,130 @@ func TestVoiceNoteAfterRealToolCallIsDropped(t *testing.T) {
 		t.Fatalf("voices=%v input=%q sent=%v", tg.voices, tts.input, tg.sent)
 	}
 }
+
+func TestWeightedModeRollsPerReplyByInputKind(t *testing.T) {
+	app, _, _, _ := voiceApp(t)
+	app.ttsMode.Store(ttsWeighted)
+	app.cfg.TTSWeightText, app.cfg.TTSWeightVoice, app.cfg.TTSAdapt = 0.3, 0.9, false
+	roll := 0.5 // the jitter roll is ignored when adapt is off
+	app.rnd = func() float64 { return roll }
+	if app.wantVoice(false, voiceCue{}) {
+		t.Fatal("0.5 >= 0.3: typed text must stay text")
+	}
+	if !app.wantVoice(true, voiceCue{}) {
+		t.Fatal("0.5 < 0.9: voice note should be answered with voice")
+	}
+	roll = 0.1
+	if !app.wantVoice(false, voiceCue{}) {
+		t.Fatal("0.1 < 0.3: typed text may get voice")
+	}
+}
+
+func TestWeightedModeViaCommandAndRealRandomness(t *testing.T) {
+	app, _, _, _ := voiceApp(t)
+	app.cfg.TTSWeightText, app.cfg.TTSWeightVoice, app.cfg.TTSAdapt = 0.3, 0.9, false
+	app.Handle(context.Background(), msg(42, "/voice weighted"))
+	if app.ttsMode.Load() != ttsWeighted {
+		t.Fatal("/voice weighted must switch the mode")
+	}
+	n := 0
+	for i := 0; i < 2000; i++ {
+		if app.wantVoice(false, voiceCue{}) {
+			n++
+		}
+	}
+	if n < 450 || n > 750 { // 0.3 * 2000 = 600
+		t.Fatalf("typed-text voice rate off: %d/2000", n)
+	}
+}
+
+func TestVoiceProbMovesWithTheSituation(t *testing.T) {
+	cue := func(user, reply string, streak, lean int) float64 {
+		return voiceProb(0.3, voiceCue{User: user, Reply: reply, Streak: streak, Lean: lean, Adapt: true}, 0)
+	}
+	long := strings.Repeat("今天天气不错我们慢慢聊。", 8)
+	plain := cue("在吗", "嗯，在的。", 0, 0)
+	if cue("在吗", long, 0, 0) >= plain {
+		t.Fatal("a long reply must be less likely to be spoken than a short one")
+	}
+	if cue("晚安", "晚安，好梦。", 0, 0) <= plain {
+		t.Fatal("warm wording must raise the odds")
+	}
+	if cue("我好累", "辛苦了，抱抱你。", 0, 0) <= plain {
+		t.Fatal("a tired user should raise the odds")
+	}
+	if cue("docker 报错了", "把配置贴给我看看。", 0, 0) >= plain {
+		t.Fatal("technical talk must lower the odds")
+	}
+	if p := cue("写个脚本", "```sh\necho hi\n```", 0, 0); p > 0.02 {
+		t.Fatalf("code must practically never be spoken: %v", p)
+	}
+	if cue("在吗", "嗯，在的。", 3, 0) >= plain || cue("在吗", "嗯，在的。", -4, 0) <= plain {
+		t.Fatal("voice runs lower the odds, text runs raise them")
+	}
+	if lean := cue("在吗", "嗯，在的。", 0, 1); lean <= plain || lean >= 1 {
+		t.Fatalf("a lean raises the odds without making them certain: %v", lean)
+	}
+	if lean := cue("在吗", "嗯，在的。", 0, -1); lean >= plain || lean <= 0 {
+		t.Fatalf("a lean to text lowers the odds without making them zero: %v", lean)
+	}
+}
+
+func TestStripLean(t *testing.T) {
+	if s, l := stripLean("[[语音]] 晚安呀"); s != "晚安呀" || l != 1 {
+		t.Fatalf("%q %d", s, l)
+	}
+	if s, l := stripLean("[[文字]]\n看这段代码"); s != "看这段代码" || l != -1 {
+		t.Fatalf("%q %d", s, l)
+	}
+	if s, l := stripLean("正文里的 [[语音]] 不动"); s != "正文里的 [[语音]] 不动" || l != 0 {
+		t.Fatalf("%q %d", s, l)
+	}
+}
+
+func TestVoiceAsk(t *testing.T) {
+	for _, s := range []string{"发条语音给我", "用语音回我吧", "说句话给我听听", "想听你的声音", "念给我听"} {
+		if voiceAsk(s) != 1 {
+			t.Errorf("%q should ask for voice", s)
+		}
+	}
+	for _, s := range []string{"别发语音了", "不要用语音", "打字就行", "先别语音，我在开会", "今天天气怎么样"} {
+		if voiceAsk(s) != -1 && voiceAsk(s) != 0 {
+			t.Errorf("%q misread", s)
+		}
+	}
+	for _, s := range []string{"别发语音了", "不要用语音", "打字就行", "先别语音，我在开会"} {
+		if voiceAsk(s) != -1 {
+			t.Errorf("%q should refuse voice", s)
+		}
+	}
+	if voiceAsk("今天天气怎么样") != 0 {
+		t.Error("no request expected")
+	}
+}
+
+func TestRequestedVoiceBeatsEveryMode(t *testing.T) {
+	app, tg, _, _ := voiceApp(t)
+	app.ttsMode.Store(ttsOff)
+	app.Handle(context.Background(), msg(42, "发条语音给我"))
+	app.Wait()
+	if len(tg.voices) != 1 {
+		t.Fatalf("an explicit request must be spoken even in off mode: %v", tg.voices)
+	}
+	app.ttsMode.Store(ttsAlways)
+	app.Handle(context.Background(), msg(42, "别发语音，打字就行"))
+	app.Wait()
+	if len(tg.voices) != 1 {
+		t.Fatalf("an explicit refusal must stay text even in always mode: %v", tg.voices)
+	}
+}
+
+func TestLeadForSpeechCutsAtASentence(t *testing.T) {
+	got := leadForSpeech("第一句话在这里。第二句话也在这里。第三句话不该被读到了呀。", 20)
+	if got != "第一句话在这里。第二句话也在这里。" {
+		t.Fatalf("%q", got)
+	}
+	if got := leadForSpeech("没有标点的一整段很长很长很长很长很长", 6); got != "没有标点的一" {
+		t.Fatalf("%q", got)
+	}
+}

@@ -129,6 +129,15 @@ func TestVoiceConfig(t *testing.T) {
 	if len(c.Validate()) != 2 {
 		t.Fatalf("bad format/mode must be rejected: %v", c.Validate())
 	}
+	wb := map[string]string{"TTS_ENABLED": "1", "TTS_BASE_URL": "http://t", "TTS_MODEL": "k", "TTS_MODE": "weighted"}
+	c = load(wb)
+	if errs := c.Validate(); len(errs) != 0 || c.TTSWeightText != 0.3 || c.TTSWeightVoice != 0.9 {
+		t.Fatalf("weighted defaults: %v %v %v", errs, c.TTSWeightText, c.TTSWeightVoice)
+	}
+	wb["TTS_VOICE_WEIGHT"] = "1.5"
+	if c = load(wb); len(c.Validate()) != 1 {
+		t.Fatalf("weight above 1 must be rejected: %v", c.Validate())
+	}
 }
 
 func TestParseTTSVoices(t *testing.T) {

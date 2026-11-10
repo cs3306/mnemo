@@ -36,15 +36,18 @@ type Config struct {
 	Embed       Endpoint
 	Review      Endpoint // style review (REVIEW_*); falls back to MAINT_*
 
-	STT         *Endpoint // speech to text (STT_*); nil = voice messages are not understood
-	STTLanguage string    // STT_LANGUAGE, ISO code like "zh"; empty = let the server detect
-	TTS         *Endpoint // text to speech (TTS_*); nil = no voice replies
-	TTSVoice    string
-	TTSVoices   []TTSVoice // TTS_VOICES: voices she may pick between in send_voice (empty = only TTSVoice)
-	TTSFormat   string     // mp3 (default) | opus | ...: what Telegram's sendVoice accepts
-	TTSMode     string     // off | auto (voice reply only to voice messages, default) | always
-	TTSMaxChars int        // longer replies are sent as text only
-	TTSText     bool       // also send the text of a voice reply (default true)
+	STT            *Endpoint // speech to text (STT_*); nil = voice messages are not understood
+	STTLanguage    string    // STT_LANGUAGE, ISO code like "zh"; empty = let the server detect
+	TTS            *Endpoint // text to speech (TTS_*); nil = no voice replies
+	TTSVoice       string
+	TTSVoices      []TTSVoice // TTS_VOICES: voices she may pick between in send_voice (empty = only TTSVoice)
+	TTSFormat      string     // mp3 (default) | opus | ...: what Telegram's sendVoice accepts
+	TTSMode        string     // off | auto (voice reply only to voice messages, default) | always
+	TTSWeightText  float64    // weighted mode: chance of a voice reply to typed text (TTS_VOICE_WEIGHT, default 0.3)
+	TTSWeightVoice float64    // weighted mode: chance of a voice reply to a voice note (TTS_VOICE_WEIGHT_IN, default 0.9)
+	TTSAdapt       bool       // weighted mode: odds also move with reply length, wording, mood and recent streak (TTS_VOICE_ADAPT, default true)
+	TTSMaxChars    int        // longer replies are sent as text only
+	TTSText        bool       // also send the text of a voice reply (default true)
 
 	Temperature      float64
 	RecentTokens     int
@@ -221,6 +224,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		c.TTSFormat = strings.ToLower(e.str("TTS_FORMAT", "mp3"))
 		c.TTSMode = strings.ToLower(e.str("TTS_MODE", "auto"))
 		c.TTSMaxChars = e.integer("TTS_MAX_CHARS", 500)
+		c.TTSWeightText = e.float("TTS_VOICE_WEIGHT", 0.3)
+		c.TTSWeightVoice = e.float("TTS_VOICE_WEIGHT_IN", 0.9)
+		c.TTSAdapt = e.boolean("TTS_VOICE_ADAPT", true)
 		c.TTSText = e.boolean("TTS_TEXT", true)
 	}
 	c.Review = e.endpoint("REVIEW", &c.Maint)
@@ -323,8 +329,13 @@ func (c *Config) Validate() []string {
 		if c.TTSFormat != "mp3" && c.TTSFormat != "opus" {
 			errs = append(errs, "TTS_FORMAT must be mp3 or opus (what Telegram voice messages accept)")
 		}
-		if c.TTSMode != "off" && c.TTSMode != "auto" && c.TTSMode != "always" {
-			errs = append(errs, "TTS_MODE must be off, auto or always")
+		if c.TTSMode != "off" && c.TTSMode != "auto" && c.TTSMode != "always" && c.TTSMode != "weighted" {
+			errs = append(errs, "TTS_MODE must be off, auto, always or weighted")
+		}
+		for name, w := range map[string]float64{"TTS_VOICE_WEIGHT": c.TTSWeightText, "TTS_VOICE_WEIGHT_IN": c.TTSWeightVoice} {
+			if w < 0 || w > 1 {
+				errs = append(errs, name+" must be between 0 and 1")
+			}
 		}
 	}
 	return errs

@@ -44,7 +44,7 @@ const help = `可用命令：
 /status  查看后端、记忆与 token 用量（含缓存命中率）
 /balance  查询 DeepSeek 账户余额
 /visiontest  检测读图模型是否真的能读图
-/voice  语音回复：/voice on 总是语音；auto 仅当我发语音时；off 关闭
+/voice  语音回复：/voice on 总是语音；auto 仅当我发语音时；weighted 按概率随机；off 关闭（你说“发条语音”时一定发语音）
 /plugins  查看插件工具；/plugins reload 重新发现
 发送图片即可读图（公式、手写、截图）；发送语音消息会先转成文字再回答（需启用 STT）。`
 
@@ -68,7 +68,7 @@ var commandMenu = []telegram.BotCommand{
 	{Command: "balance", Description: "DeepSeek 账户余额"},
 	{Command: "plugins", Description: "查看插件工具"},
 	{Command: "visiontest", Description: "检测读图模型是否真的能读图"},
-	{Command: "voice", Description: "语音回复：on / auto / off"},
+	{Command: "voice", Description: "语音回复：on / auto / weighted / off"},
 }
 
 // CommandSetter is implemented by the real Telegram client; test fakes may skip it.
@@ -129,7 +129,10 @@ type App struct {
 	vision        llm.Completer
 	stt           Transcriber
 	tts           Synthesizer
-	ttsMode       atomic.Int32 // ttsOff / ttsAuto / ttsAlways, changed by /voice
+	ttsMode       atomic.Int32   // ttsOff / ttsAuto / ttsAlways, changed by /voice
+	rnd           func() float64 // [0,1); tests override it (weighted voice mode)
+	vmu           sync.Mutex
+	vrun          map[int64]int // per chat: voice replies in a row (>0) or typed replies in a row (<0), see voicepick.go
 	review        llm.Completer
 	style         *style.Store
 	reviewing     atomic.Bool
@@ -179,6 +182,8 @@ func New(cfg *config.Config, d Deps) (*App, error) {
 		a.ttsMode.Store(ttsOff)
 	case "always":
 		a.ttsMode.Store(ttsAlways)
+	case "weighted":
+		a.ttsMode.Store(ttsWeighted)
 	default:
 		a.ttsMode.Store(ttsAuto)
 	}
@@ -531,10 +536,11 @@ const (
 	ttsOff int32 = iota
 	ttsAuto
 	ttsAlways
+	ttsWeighted // spoken with a probability, see voicepick.go
 )
 
 // wantVoice reports whether this turn's reply should also (or only) be spoken.
-func (a *App) wantVoice(voiceIn bool) bool {
+func (a *App) wantVoice(voiceIn bool, c voiceCue) bool {
 	if a.tts == nil {
 		return false
 	}
@@ -546,6 +552,16 @@ func (a *App) wantVoice(voiceIn bool) bool {
 		return true
 	case ttsAuto:
 		return voiceIn
+	case ttsWeighted:
+		w := a.cfg.TTSWeightText
+		if voiceIn {
+			w = a.cfg.TTSWeightVoice
+		}
+		c.Adapt = a.cfg.TTSAdapt
+		if c.Adapt && len([]rune(c.Reply)) > a.cfg.TTSMaxChars {
+			return false // too long to read out; speak() would refuse it anyway
+		}
+		return a.roll() < voiceProb(w, c, 2*a.roll()-1) // each reply rolls on its own
 	}
 	return false
 }
@@ -622,17 +638,40 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string, v
 		return
 	}
 	replied = r.Text != "" || len(r.Files) > 0 || r.VoiceSent
-	voiceOut := a.wantVoice(voiceIn) && !r.VoiceSent // she already spoke on her own: do not read the text out again
-	spoke := false
-	if voiceOut && !a.cfg.TTSText {
-		spoke = a.speak(ctx, chat, r.Text, "") // voice only; fall back to text when speaking is not possible
+	// What the user asked for wins ("发条语音" always speaks, "别发语音" never does); otherwise the mode decides.
+	// She already spoke on her own (send_voice): do not read the text out again.
+	ask := voiceAsk(text)
+	voiceOut := false
+	switch {
+	case r.VoiceSent || ask < 0 || r.Text == "":
+	case ask > 0:
+		voiceOut = a.voiceReady()
+	default:
+		voiceOut = a.wantVoice(voiceIn, voiceCue{User: text, Reply: r.Text, Streak: a.streak(chat), Lean: r.VoiceLean})
+	}
+	spoke, voiced := false, r.VoiceSent
+	if voiceOut {
+		line := r.Text
+		if ask > 0 && len([]rune(speech.CleanForSpeech(line, 0))) > a.cfg.TTSMaxChars {
+			line = leadForSpeech(speech.CleanForSpeech(line, 0), a.cfg.TTSMaxChars) // requested but long: read the beginning
+			a.sendReply(ctx, chat, r.Text)
+			voiced = a.speak(ctx, chat, line, "")
+			a.notePlay(chat, voiced)
+			a.deliverFiles(ctx, chat, r.Files)
+			return
+		}
+		if !a.cfg.TTSText {
+			spoke = a.speak(ctx, chat, line, "") // voice only; fall back to text when speaking is not possible
+			voiced = spoke
+		}
 	}
 	if !spoke && r.Text != "" {
 		a.sendReply(ctx, chat, r.Text)
 		if voiceOut && a.cfg.TTSText {
-			a.speak(ctx, chat, r.Text, "")
+			voiced = a.speak(ctx, chat, r.Text, "")
 		}
 	}
+	a.notePlay(chat, voiced)
 	a.deliverFiles(ctx, chat, r.Files)
 }
 
@@ -678,6 +717,7 @@ type Reply struct {
 	Reasoning string
 	Files     []OutFile // produced by plugin tools during the turn, to be delivered by the frontend
 	VoiceSent bool      // she already sent a voice message herself (send_voice) this turn
+	VoiceLean int       // +1 / -1: she asked for voice / text with a leading [[语音]] / [[文字]] (a nudge for TTS_MODE=weighted)
 }
 
 func (a *App) describeImages(ctx context.Context, imgs []Image) (string, error) {
@@ -795,6 +835,9 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 		}
 		tools, _ = json.Marshal(append(arr, a.voiceToolDef()))
 	}
+	if ts.voice && a.ttsMode.Load() == ttsWeighted && a.cfg.TTSAdapt {
+		msgs = append(msgs, llm.Text("system", leanNote))
+	}
 	tc, canTools := a.chat.(llm.ToolCompleter)
 	if len(tools) > 0 && !canTools {
 		if len(opts.Tools) > 0 {
@@ -854,6 +897,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 		rounds++
 	}
 	reply := a.rescueVoiceMarker(ctx, res.Text, ts)
+	reply, lean := stripLean(reply)
 	if reply == "" && len(ts.spoken) == 0 {
 		return Reply{}, errEmpty
 	}
@@ -883,7 +927,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 			}
 		})
 	}
-	return Reply{Text: reply, Files: ts.files, VoiceSent: len(ts.spoken) > 0}, nil
+	return Reply{Text: reply, Files: ts.files, VoiceSent: len(ts.spoken) > 0, VoiceLean: lean}, nil
 }
 
 func truncate(s string, n int) string {
@@ -1184,14 +1228,17 @@ func (a *App) command(ctx context.Context, chat int64, text string) {
 			a.ttsMode.Store(ttsAlways)
 		case "auto":
 			a.ttsMode.Store(ttsAuto)
+		case "weighted", "mix":
+			a.ttsMode.Store(ttsWeighted)
 		case "off":
 			a.ttsMode.Store(ttsOff)
 		case "":
 		default:
-			reply("用法：/voice on | auto | off")
+			reply("用法：/voice on | auto | weighted | off（直接说“发条语音”“别发语音”优先于这个设置）")
 			return
 		}
-		reply(map[int32]string{ttsOff: "语音回复：关闭", ttsAuto: "语音回复：auto（你发语音时我才用语音回）", ttsAlways: "语音回复：总是"}[a.ttsMode.Load()] + "（重启后恢复为 TTS_MODE）")
+		reply(map[int32]string{ttsOff: "语音回复：关闭", ttsAuto: "语音回复：auto（你发语音时我才用语音回）", ttsAlways: "语音回复：总是",
+			ttsWeighted: fmt.Sprintf("语音回复：按权重（你发语音时 %.0f%%，发文字时 %.0f%%）", a.cfg.TTSWeightVoice*100, a.cfg.TTSWeightText*100)}[a.ttsMode.Load()] + "（重启后恢复为 TTS_MODE）")
 	case "/visiontest":
 		if a.vision == nil {
 			reply(errVisionOff.Error())

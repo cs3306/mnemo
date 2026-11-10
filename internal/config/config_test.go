@@ -145,3 +145,29 @@ func TestParseTTSVoices(t *testing.T) {
 		t.Fatalf("default voice should be the first: %+v", c)
 	}
 }
+
+func TestPluginEventsSetting(t *testing.T) {
+	load := func(v string) (*Config, error) {
+		return Load(func(k string) string {
+			return map[string]string{"PLUGIN_EVENTS": v, "LLM_MODEL": "m", "API_KEY": "k"}[k]
+		})
+	}
+	for _, v := range []string{"", "false", "off", "0"} {
+		if c, err := load(v); err != nil || len(c.PluginEvents) != 0 {
+			t.Fatalf("%q must allow nothing: %v %v", v, c.PluginEvents, err)
+		}
+	}
+	for _, v := range []string{"true", "all", "ON"} {
+		c, err := load(v)
+		if err != nil || len(c.PluginEvents) != len(EventTypes) {
+			t.Fatalf("%q must allow every type: %v %v", v, c.PluginEvents, err)
+		}
+	}
+	c, err := load("user_message, turn_done")
+	if err != nil || !c.PluginEvents["user_message"] || !c.PluginEvents["turn_done"] || c.PluginEvents["startup"] {
+		t.Fatalf("list: %v %v", c.PluginEvents, err)
+	}
+	if _, err := load("user_message,typo"); err == nil {
+		t.Fatal("an unknown event name must be rejected")
+	}
+}

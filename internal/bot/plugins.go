@@ -50,6 +50,7 @@ type FileSender interface {
 
 type pluginState struct {
 	tools   []string
+	events  map[string]bool // event types this server asked for in its /v1/tools answer ("events":[...])
 	lastTry time.Time
 	err     string
 }
@@ -140,7 +141,8 @@ func (a *App) discoverURL(ctx context.Context, base string) error {
 		return fail(fmt.Errorf("HTTP %d", resp.StatusCode))
 	}
 	var list struct {
-		Tools []struct {
+		Events []string `json:"events"`
+		Tools  []struct {
 			Name        string          `json:"name"`
 			Description string          `json:"description"`
 			Parameters  json.RawMessage `json:"parameters"`
@@ -178,6 +180,10 @@ func (a *App) discoverURL(ctx context.Context, base string) error {
 	}
 	st := p.urls[base]
 	st.tools, st.lastTry, st.err = nil, a.now(), ""
+	st.events = map[string]bool{}
+	for _, ev := range list.Events {
+		st.events[strings.TrimSpace(ev)] = true
+	}
 	for n, t := range fresh {
 		if old, taken := p.tools[n]; taken {
 			slog.Warn("plugin tool skipped: name already provided by another plugin server", "name", n, "kept", old.base, "skipped", base)

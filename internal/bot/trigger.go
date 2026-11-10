@@ -67,6 +67,7 @@ func (a *App) runScheduled(chat int64, label, prompt string) {
 	defer l.Unlock()
 	a.touch(chat)
 	defer a.touch(chat)
+	defer a.emit("turn_done", chat, map[string]any{"origin": "scheduled", "replied": true}) // a failure notice or a "nothing came back" note is sent too
 	ctx, cancel := context.WithTimeout(a.bg, triggerTimeout)
 	defer cancel()
 	a.tg.Typing(ctx, chat)

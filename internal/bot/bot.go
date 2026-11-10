@@ -142,10 +142,12 @@ type App struct {
 	personaWarned atomic.Bool
 	tr            *tracker
 	httpc         *http.Client
-	fetchc        *http.Client  // web_fetch (SEARCH_PROVIDER=searxng): guarded against internal addresses
-	plug          *pluginSet    // tool plugin servers (PLUGIN_URLS), see plugins.go
-	visionState   atomic.Int32  // visionUnknown / visionOK / visionBad, see visionprobe.go
-	probeCode     func() string // tests override the random probe code
+	evMu          sync.Mutex
+	evQ           map[string]*eventQueue // per plugin server: events waiting to be delivered, in order
+	fetchc        *http.Client           // web_fetch (SEARCH_PROVIDER=searxng): guarded against internal addresses
+	plug          *pluginSet             // tool plugin servers (PLUGIN_URLS), see plugins.go
+	visionState   atomic.Int32           // visionUnknown / visionOK / visionBad, see visionprobe.go
+	probeCode     func() string          // tests override the random probe code
 
 	mu           sync.Mutex
 	chatLocks    map[int64]*sync.Mutex
@@ -272,7 +274,10 @@ func (a *App) Run(ctx context.Context) error {
 		a.goBG(func() { a.startupProbe(ctx) })
 	}
 	if len(a.cfg.PluginURLs) > 0 {
-		a.goBG(func() { slog.Info("plugins", "status", a.discoverAll(ctx)) })
+		a.goBG(func() {
+			slog.Info("plugins", "status", a.discoverAll(ctx))
+			a.emit("startup", a.defaultChat(), nil)
+		})
 	}
 	if a.cfg.APIAddr != "" {
 		a.goBG(func() {
@@ -438,6 +443,20 @@ func (a *App) Handle(ctx context.Context, u telegram.Update) {
 		voice = m.Audio
 	}
 
+	if text != "" || fileID != "" || doc != nil || voice != nil {
+		kind := "text"
+		switch {
+		case strings.HasPrefix(text, "/") && fileID == "" && doc == nil && voice == nil:
+			kind = "command"
+		case voice != nil:
+			kind = "voice"
+		case fileID != "":
+			kind = "image"
+		case doc != nil:
+			kind = "file"
+		}
+		a.emit("user_message", chat, map[string]any{"kind": kind}) // before the chat lock: a long running turn must not delay it
+	}
 	l := a.chatLock(chat)
 	l.Lock()
 	defer l.Unlock()
@@ -580,6 +599,8 @@ var (
 )
 
 func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string, voiceIn bool) {
+	replied := true // every path says something to the user (an error notice counts), except an empty model reply
+	defer func() { a.emit("turn_done", chat, map[string]any{"origin": "user", "replied": replied}) }()
 	a.tg.Typing(ctx, chat)
 	var imgs []Image
 	if fileID != "" {
@@ -600,6 +621,7 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string, v
 		a.send(ctx, chat, "出错了："+truncate(err.Error(), 200))
 		return
 	}
+	replied = r.Text != "" || len(r.Files) > 0 || r.VoiceSent
 	voiceOut := a.wantVoice(voiceIn) && !r.VoiceSent // she already spoke on her own: do not read the text out again
 	spoke := false
 	if voiceOut && !a.cfg.TTSText {

@@ -68,15 +68,16 @@ type Config struct {
 	APIKey   string
 	APIModel string // model name advertised by the API
 
-	SearchEnabled     bool          // give the model web_search / web_fetch tools (DeepSeek Search/Fetch API)
-	SearchBase        string        // default: LLM_BASE_URL without a trailing /v1
-	SearchKey         string        // default: LLM_API_KEY
-	SearchProvider    string        // "deepseek" (default) or "searxng"
-	SearxngURL        string        // SEARXNG_URL, e.g. http://searxng:8080
-	FetchAllowPrivate bool          // allow web_fetch to reach private/loopback addresses (searxng provider)
-	PluginURLs        []string      // PLUGIN_URLS: base URLs of tool plugin servers (see README)
-	PluginToken       string        // PLUGIN_TOKEN: bearer token sent to every plugin server
-	PluginTimeout     time.Duration // PLUGIN_TIMEOUT seconds per tool call
+	SearchEnabled     bool            // give the model web_search / web_fetch tools (DeepSeek Search/Fetch API)
+	SearchBase        string          // default: LLM_BASE_URL without a trailing /v1
+	SearchKey         string          // default: LLM_API_KEY
+	SearchProvider    string          // "deepseek" (default) or "searxng"
+	SearxngURL        string          // SEARXNG_URL, e.g. http://searxng:8080
+	FetchAllowPrivate bool            // allow web_fetch to reach private/loopback addresses (searxng provider)
+	PluginURLs        []string        // PLUGIN_URLS: base URLs of tool plugin servers (see README)
+	PluginToken       string          // PLUGIN_TOKEN: bearer token sent to every plugin server
+	PluginEvents      map[string]bool // PLUGIN_EVENTS: event types that may be announced to plugins (POST /v1/events); empty = none
+	PluginTimeout     time.Duration   // PLUGIN_TIMEOUT seconds per tool call
 	MaxToolRounds     int
 	ToolGraceRounds   int // TOOL_GRACE_ROUNDS: the last rounds of a turn, announced to the model so it can wrap up
 
@@ -263,6 +264,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		}
 	}
 	c.PluginToken = e.str("PLUGIN_TOKEN", "")
+	c.PluginEvents = e.eventTypes("PLUGIN_EVENTS")
 	c.PluginTimeout = time.Duration(e.float("PLUGIN_TIMEOUT", 180) * float64(time.Second))
 	c.MaxToolRounds = e.integer("MAX_TOOL_ROUNDS", 4)
 	c.ToolGraceRounds = e.integer("TOOL_GRACE_ROUNDS", 3)
@@ -343,6 +345,40 @@ func parseTTSVoices(raw string) []TTSVoice {
 		}
 		seen[name] = true
 		out = append(out, TTSVoice{Name: name, Desc: desc})
+	}
+	return out
+}
+
+// EventTypes are the events mnemo can announce to plugin servers (see PLUGIN_EVENTS in the README).
+var EventTypes = []string{"user_message", "turn_done", "startup"}
+
+// eventTypes reads a switch-or-list setting: empty/false = none (the default), true/all = every known event,
+// otherwise a comma-separated list of event names.
+func (e *env) eventTypes(name string) map[string]bool {
+	raw := strings.ToLower(strings.TrimSpace(e.str(name, "")))
+	out := map[string]bool{}
+	switch raw {
+	case "", "false", "off", "no", "0", "none":
+		return out
+	case "true", "on", "yes", "1", "all":
+		for _, t := range EventTypes {
+			out[t] = true
+		}
+		return out
+	}
+	known := map[string]bool{}
+	for _, t := range EventTypes {
+		known[t] = true
+	}
+	for _, t := range strings.Split(raw, ",") {
+		if t = strings.TrimSpace(t); t == "" {
+			continue
+		}
+		if !known[t] {
+			e.errs = append(e.errs, fmt.Sprintf("%s: unknown event %q (known: %s)", name, t, strings.Join(EventTypes, ", ")))
+			continue
+		}
+		out[t] = true
 	}
 	return out
 }

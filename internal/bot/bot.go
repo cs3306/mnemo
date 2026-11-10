@@ -655,20 +655,20 @@ func (a *App) turn(ctx context.Context, chat int64, text, fileID, mime string, v
 		if ask > 0 && len([]rune(speech.CleanForSpeech(line, 0))) > a.cfg.TTSMaxChars {
 			line = leadForSpeech(speech.CleanForSpeech(line, 0), a.cfg.TTSMaxChars) // requested but long: read the beginning
 			a.sendReply(ctx, chat, r.Text)
-			voiced = a.speak(ctx, chat, line, "")
+			voiced = a.speak(ctx, chat, line, r.VoiceName)
 			a.notePlay(chat, voiced)
 			a.deliverFiles(ctx, chat, r.Files)
 			return
 		}
 		if !a.cfg.TTSText {
-			spoke = a.speak(ctx, chat, line, "") // voice only; fall back to text when speaking is not possible
+			spoke = a.speak(ctx, chat, line, r.VoiceName) // voice only; fall back to text when speaking is not possible
 			voiced = spoke
 		}
 	}
 	if !spoke && r.Text != "" {
 		a.sendReply(ctx, chat, r.Text)
 		if voiceOut && a.cfg.TTSText {
-			voiced = a.speak(ctx, chat, r.Text, "")
+			voiced = a.speak(ctx, chat, r.Text, r.VoiceName)
 		}
 	}
 	a.notePlay(chat, voiced)
@@ -718,6 +718,7 @@ type Reply struct {
 	Files     []OutFile // produced by plugin tools during the turn, to be delivered by the frontend
 	VoiceSent bool      // she already sent a voice message herself (send_voice) this turn
 	VoiceLean int       // +1 / -1: she asked for voice / text with a leading [[语音]] / [[文字]] (a nudge for TTS_MODE=weighted)
+	VoiceName string    // the voice she picked with a leading [[声:name]] (empty = default)
 }
 
 func (a *App) describeImages(ctx context.Context, imgs []Image) (string, error) {
@@ -838,6 +839,9 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 	if ts.voice && a.ttsMode.Load() == ttsWeighted && a.cfg.TTSAdapt {
 		msgs = append(msgs, llm.Text("system", leanNote))
 	}
+	if ts.voice && len(a.cfg.TTSVoices) > 1 {
+		msgs = append(msgs, llm.Text("system", a.voiceChoiceNote()))
+	}
 	tc, canTools := a.chat.(llm.ToolCompleter)
 	if len(tools) > 0 && !canTools {
 		if len(opts.Tools) > 0 {
@@ -897,7 +901,11 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 		rounds++
 	}
 	reply := a.rescueVoiceMarker(ctx, res.Text, ts)
+	reply, vname := stripVoiceName(reply, a.voiceNames())
 	reply, lean := stripLean(reply)
+	if vname == "" { // the two markers may come in either order
+		reply, vname = stripVoiceName(reply, a.voiceNames())
+	}
 	if reply == "" && len(ts.spoken) == 0 {
 		return Reply{}, errEmpty
 	}
@@ -927,7 +935,7 @@ func (a *App) RespondTools(ctx context.Context, chat int64, text string, imgs []
 			}
 		})
 	}
-	return Reply{Text: reply, Files: ts.files, VoiceSent: len(ts.spoken) > 0, VoiceLean: lean}, nil
+	return Reply{Text: reply, Files: ts.files, VoiceSent: len(ts.spoken) > 0, VoiceLean: lean, VoiceName: vname}, nil
 }
 
 func truncate(s string, n int) string {
